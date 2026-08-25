@@ -12,9 +12,24 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-  apiKey: "mock-key", authDomain: "mock.firebaseapp.com", projectId: "mock-project"
+const firebaseConfig = {
+
+  apiKey: "AIzaSyCbof1yuALr5XNbrlpTF8GFDl_qA5wxV9g",
+
+  authDomain: "wasted-608fb.firebaseapp.com",
+
+  projectId: "wasted-608fb",
+
+  storageBucket: "wasted-608fb.firebasestorage.app",
+
+  messagingSenderId: "203014769425",
+
+  appId: "1:203014769425:web:0f989470d200c62bcb1ab0",
+
+  measurementId: "G-874MN5WBN3"
+
 };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
