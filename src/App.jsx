@@ -11,24 +11,9 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 
-const firebaseConfig = {
-
-  apiKey: "AIzaSyCbof1yuALr5XNbrlpTF8GFDl_qA5wxV9g",
-
-  authDomain: "wasted-608fb.firebaseapp.com",
-
-  projectId: "wasted-608fb",
-
-  storageBucket: "wasted-608fb.firebasestorage.app",
-
-  messagingSenderId: "203014769425",
-
-  appId: "1:203014769425:web:0f989470d200c62bcb1ab0",
-
-  measurementId: "G-874MN5WBN3"
-
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+  apiKey: "mock-key", authDomain: "mock.firebaseapp.com", projectId: "mock-project"
 };
-
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -54,6 +39,14 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
+  
+  // Shared URL parsing
+  const urlParams = new URLSearchParams(window.location.search);
+  const shareUid = urlParams.get('share');
+  const shareStart = urlParams.get('s');
+  const shareEnd = urlParams.get('e');
+  const isSharedMode = !!shareUid;
+  const [sharedData, setSharedData] = useState(null);
   
   // App State
   const [transactions, setTransactions] = useState([]);
@@ -89,6 +82,21 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
+
+    // If viewing a shared link, ONLY fetch the shared data
+    if (isSharedMode) {
+      const txRef = collection(db, 'artifacts', appId, 'users', shareUid, 'transactions');
+      const unsubTx = onSnapshot(txRef, (snapshot) => {
+        const data = snapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() }))
+          .filter(t => t.date >= shareStart && t.date <= shareEnd);
+        data.sort((a, b) => new Date(b.date) - new Date(a.date));
+        setSharedData(data);
+      }, (error) => console.error("Error fetching shared tx:", error));
+      
+      return () => unsubTx();
+    }
+
     const userId = user.uid;
 
     const txRef = collection(db, 'artifacts', appId, 'users', userId, 'transactions');
@@ -181,7 +189,49 @@ export default function App() {
     return <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>Loading...</div>;
   }
 
-  if (!user || (user.isAnonymous && typeof __initial_auth_token === 'undefined')) {
+  // --- NEW CODE: Render the Shared Report for your mother ---
+  if (isSharedMode && sharedData) {
+    const totalWasted = sharedData.filter(t => t.type === 'expense').reduce((acc, t) => acc + Number(t.amount), 0);
+    return (
+      <div className={`min-h-screen p-4 md:p-8 ${darkMode ? 'bg-gray-950 text-gray-100' : 'bg-gray-50 text-gray-900'}`}>
+         <div className="max-w-3xl mx-auto space-y-6">
+            <div className="text-center space-y-2 mb-8">
+               <div className="flex justify-center text-rose-500 mb-4"><Wine size={48} /></div>
+               <h1 className="text-3xl font-black tracking-tight">Shared Expense Report</h1>
+               <p className="opacity-70">From {new Date(shareStart).toLocaleDateString()} to {new Date(shareEnd).toLocaleDateString()}</p>
+            </div>
+            <div className={`p-6 rounded-2xl text-center shadow-lg ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-200'}`}>
+               <div className="text-sm opacity-60 mb-2">Total Wasted in Period</div>
+               <div className="text-4xl font-bold text-rose-500">₹{totalWasted.toLocaleString('en-IN')}</div>
+            </div>
+            <div className="space-y-3">
+               {sharedData.length === 0 ? (
+                  <div className="text-center opacity-50 py-8">No expenses logged in this period.</div>
+               ) : (
+                  sharedData.map(t => (
+                     <div key={t.id} className={`flex justify-between p-4 rounded-xl border ${darkMode ? 'border-gray-800 bg-gray-900' : 'border-gray-200 bg-white'}`}>
+                        <div>
+                           <div className="font-bold">{t.reason || t.tag}</div>
+                           <div className="text-xs opacity-60 mt-1">{new Date(t.date).toLocaleDateString()} &bull; {t.tag}</div>
+                        </div>
+                        <div className={`font-bold ${t.type === 'income' ? 'text-emerald-500' : 'text-gray-900 dark:text-gray-100'}`}>
+                           {t.type === 'income' ? '+' : '-'}₹{Number(t.amount).toLocaleString('en-IN')}
+                        </div>
+                     </div>
+                  ))
+               )}
+            </div>
+            <div className="text-center mt-8 pb-8">
+               <button onClick={() => window.location.href = '/'} className="text-rose-500 font-bold hover:underline">Build your own tracker</button>
+            </div>
+         </div>
+      </div>
+    );
+  }
+  // ------------------------------------------------------------
+
+  // MODIFIED: Hide login screen if they are viewing a shared report
+  if (!isSharedMode && (!user || (user.isAnonymous && typeof __initial_auth_token === 'undefined'))) {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-4 ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>
         <div className={`max-w-md w-full p-8 rounded-2xl shadow-xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
@@ -824,7 +874,8 @@ const ShareModal = ({ user, onClose, dark }) => {
 
    const generate = () => {
       if(!start || !end) return;
-      const url = `${window.location.origin}/wasted-report/${btoa(user.uid).slice(0,8)}?s=${start}&e=${end}`;
+      // MODIFIED: Use query parameters and the actual user UID to prevent 404s
+      const url = `${window.location.origin}/?share=${user.uid}&s=${start}&e=${end}`;
       setLink(url);
    }
 
