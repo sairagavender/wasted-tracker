@@ -80,7 +80,8 @@ export default function App() {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
+        } else if (typeof __firebase_config !== 'undefined') {
+          // This prevents the app from trying to anonymously log you in on Vercel
           await signInAnonymously(auth);
         }
       } catch (err) {
