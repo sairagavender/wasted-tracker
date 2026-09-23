@@ -29,7 +29,6 @@ const firebaseConfig = {
   measurementId: "G-874MN5WBN3"
 
 };
-
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -182,31 +181,10 @@ export default function App() {
     return acc; // 'borrowed' doesn't affect physical bank balance
   }, 0);
 
-const totalIncome = transactions
-  .filter(t => {
-    const transactionMonth = t.date.slice(0, 7);
-
-    return (
-      t.type === 'income' &&
-      transactionMonth === `${currentYear}-${currentMonth}`
-    );
-  })
-  .reduce((acc, t) => acc + Number(t.amount), 0);
+  const totalIncome = transactions.filter(t => t.type === 'income').reduce((acc, t) => acc + Number(t.amount), 0);
   
-  const today = new Date();
-
-const currentYear = today.getFullYear();
-const currentMonth = String(today.getMonth() + 1).padStart(2, '0');
-
-const totalExpense = transactions
-  .filter(t => {
-    const transactionMonth = t.date.slice(0, 7);
-    return (
-      (t.type === 'expense' || t.type === 'borrowed') &&
-      transactionMonth === `${currentYear}-${currentMonth}`
-    );
-  })
-  .reduce((acc, t) => acc + Number(t.amount), 0);
+  // Wasted includes pure expenses AND things you borrowed money to buy (Ghost Expenses)
+  const totalExpense = transactions.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
 
   // Splitwise-style Ledger by Person
   const friendLedgers = useMemo(() => {
@@ -434,7 +412,7 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
           <div className="text-2xl font-bold text-emerald-500">₹{income.toLocaleString('en-IN')}</div>
         </div>
         <div className={`p-6 rounded-2xl ${cardClasses}`}>
-          <div className="flex items-center gap-2 text-sm opacity-60 mb-1"><ArrowUpRight size={16} className="text-rose-500"/>Wasted This Month</div>
+          <div className="flex items-center gap-2 text-sm opacity-60 mb-1"><ArrowUpRight size={16} className="text-rose-500"/> Total Wasted</div>
           <div className="text-2xl font-bold text-rose-500">₹{expense.toLocaleString('en-IN')}</div>
         </div>
       </div>
