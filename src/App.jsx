@@ -6,7 +6,7 @@ import {
   LayoutDashboard, PieChart as PieChartIcon, HandCoins,
   Moon, Sun, Search, Share2, ArrowUpRight, ArrowDownRight, 
   CheckCircle2, Wine, Calendar as CalendarIcon, X, Settings, ChevronLeft, Plus,
-  Pencil, Trash2, Users, Ghost, ArrowRightLeft
+  Pencil, Trash2, Users, Ghost, ArrowRightLeft, CalendarDays, Link as LinkIcon
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
@@ -29,6 +29,7 @@ const firebaseConfig = {
   measurementId: "G-874MN5WBN3"
 
 };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -47,7 +48,7 @@ const DEFAULT_SETTINGS = {
   quickAdds: [
     { id: 'qa1', amount: 20, tag: 'Drinks', reason: 'Tea/Coffee' }
   ],
-  friends: [] // Array of { id, name }
+  friends: []
 };
 
 export default function App() {
@@ -55,24 +56,31 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
   
-  // Shared URL parsing
+  // Shared URL parsing (Bulletproof against Vercel 404s)
   const urlParams = new URLSearchParams(window.location.search);
   const shareUid = urlParams.get('share');
   const shareStart = urlParams.get('s');
   const shareEnd = urlParams.get('e');
   const isSharedMode = !!shareUid;
   const [sharedData, setSharedData] = useState(null);
+  const [sharedOwnerName, setSharedOwnerName] = useState("Someone");
   
   // App State
   const [transactions, setTransactions] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   
-  // UI State
+  // UI & Time Filter State
   const [currentView, setCurrentView] = useState('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTagDetail, setSelectedTagDetail] = useState(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
+  
+  const [timeFilter, setTimeFilter] = useState('monthly'); // lifetime, monthly, weekly, custom
+  const [customDate, setCustomDate] = useState({ 
+     start: new Date().toISOString().split('T')[0], 
+     end: new Date().toISOString().split('T')[0] 
+  });
 
   useEffect(() => {
     const initAuth = async () => {
@@ -80,7 +88,6 @@ export default function App() {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else if (typeof __firebase_config !== 'undefined') {
-          // This prevents the app from trying to anonymously log you in on Vercel
           await signInAnonymously(auth);
         }
       } catch (err) {
@@ -97,8 +104,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
-
+    // If in Share Mode, we don't need the user to be logged in. We fetch directly.
     if (isSharedMode) {
       const txRef = collection(db, 'artifacts', appId, 'users', shareUid, 'transactions');
       const unsubTx = onSnapshot(txRef, (snapshot) => {
@@ -108,8 +114,19 @@ export default function App() {
         data.sort((a, b) => new Date(b.date) - new Date(a.date));
         setSharedData(data);
       }, (error) => console.error("Error fetching shared tx:", error));
+      
+      // Attempt to get owner's basic settings for tags/name, ignoring errors if missing
+      const settingsRef = doc(db, 'artifacts', appId, 'users', shareUid, 'settings', 'preferences');
+      onSnapshot(settingsRef, (docSnap) => {
+         if(docSnap.exists()) {
+             setSettings({ ...DEFAULT_SETTINGS, ...docSnap.data() });
+         }
+      });
+
       return () => unsubTx();
     }
+
+    if (!user) return;
 
     const userId = user.uid;
     const txRef = collection(db, 'artifacts', appId, 'users', userId, 'transactions');
@@ -130,6 +147,86 @@ export default function App() {
 
     return () => { unsubTx(); unsubSettings(); };
   }, [user, isSharedMode, shareUid, shareStart, shareEnd]);
+
+  const dateBounds = useMemo(() => {
+     const today = new Date();
+     const formatDate = (d) => {
+        const offset = d.getTimezoneOffset() * 60000;
+        return new Date(d.getTime() - offset).toISOString().split('T')[0];
+     };
+     
+     if (timeFilter === 'weekly') {
+        const d = new Date();
+        const day = d.getDay();
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Monday
+        d.setDate(diff);
+        const start = new Date(d);
+        const end = new Date(d);
+        end.setDate(end.getDate() + 6);
+        return { start: formatDate(start), end: formatDate(end), label: 'This Week' };
+     }
+     
+     if (timeFilter === 'monthly') {
+        const start = new Date(today.getFullYear(), today.getMonth(), 1);
+        const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+        return { start: formatDate(start), end: formatDate(end), label: 'This Month' };
+     }
+     
+     if (timeFilter === 'custom') {
+        return { start: customDate.start, end: customDate.end, label: 'Custom Period' };
+     }
+     
+     return { start: null, end: null, label: 'Lifetime' };
+  }, [timeFilter, customDate]);
+
+  // The transactions filtered by the selected TIME PERIOD
+  const dateFilteredTransactions = useMemo(() => {
+     let filtered = transactions;
+     if (dateBounds.start) filtered = filtered.filter(t => t.date >= dateBounds.start);
+     if (dateBounds.end) filtered = filtered.filter(t => t.date <= dateBounds.end);
+     return filtered;
+  }, [transactions, dateBounds]);
+
+  // The transactions filtered by Time Period AND Search Query (for display lists)
+  const displayTransactions = useMemo(() => {
+    if (!searchQuery) return dateFilteredTransactions;
+    return dateFilteredTransactions.filter(t => 
+      (t.reason || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+      (t.tag || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (t.person || '').toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [dateFilteredTransactions, searchQuery]);
+
+  // NOTE: Bank Balance is ALWAYS LIFETIME. It makes no sense to have a "weekly" bank balance.
+  const lifetimeBalance = transactions.reduce((acc, t) => {
+    if (t.type === 'income' || t.type === 'settle_received') return acc + Number(t.amount);
+    if (t.type === 'expense' || t.type === 'lent' || t.type === 'settle_gave') return acc - Number(t.amount);
+    return acc; 
+  }, 0);
+
+  // Income and Wasted are based on the FILTERED time period.
+  const periodIncome = dateFilteredTransactions.filter(t => t.type === 'income').reduce((acc, t) => acc + Number(t.amount), 0);
+  const periodWasted = dateFilteredTransactions.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
+
+  // Splitwise-style Ledger by Person (ALWAYS LIFETIME for accurate current debts)
+  const friendLedgers = useMemo(() => {
+    const ledgers = {};
+    transactions.forEach(t => {
+      if (!t.person) return;
+      if (!ledgers[t.person]) ledgers[t.person] = { netBalance: 0, history: [] };
+      
+      const ledger = ledgers[t.person];
+      if (t.type === 'lent') ledger.netBalance += Number(t.amount);
+      if (t.type === 'borrowed') ledger.netBalance -= Number(t.amount);
+      if (t.type === 'settle_received') ledger.netBalance -= Number(t.amount);
+      if (t.type === 'settle_gave') ledger.netBalance += Number(t.amount);
+      ledger.history.push(t);
+    });
+    return ledgers;
+  }, [transactions]);
+
+  const totalOwedToMe = Object.values(friendLedgers).filter(l => l.netBalance > 0).reduce((acc, l) => acc + l.netBalance, 0);
+  const totalIOwe = Object.values(friendLedgers).filter(l => l.netBalance < 0).reduce((acc, l) => acc + Math.abs(l.netBalance), 0);
 
   const handleGoogleLogin = async () => {
     try {
@@ -165,47 +262,6 @@ export default function App() {
     await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id));
   };
 
-  const filteredTransactions = useMemo(() => {
-    if (!searchQuery) return transactions;
-    return transactions.filter(t => 
-      (t.reason || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
-      (t.tag || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (t.person || '').toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [transactions, searchQuery]);
-
-  // Core Ledger Calculations
-  const currentBalance = transactions.reduce((acc, t) => {
-    if (t.type === 'income' || t.type === 'settle_received') return acc + Number(t.amount);
-    if (t.type === 'expense' || t.type === 'lent' || t.type === 'settle_gave') return acc - Number(t.amount);
-    return acc; // 'borrowed' doesn't affect physical bank balance
-  }, 0);
-
-  const totalIncome = transactions.filter(t => t.type === 'income').reduce((acc, t) => acc + Number(t.amount), 0);
-  
-  // Wasted includes pure expenses AND things you borrowed money to buy (Ghost Expenses)
-  const totalExpense = transactions.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
-
-  // Splitwise-style Ledger by Person
-  const friendLedgers = useMemo(() => {
-    const ledgers = {};
-    transactions.forEach(t => {
-      if (!t.person) return;
-      if (!ledgers[t.person]) ledgers[t.person] = { netBalance: 0, history: [] };
-      
-      const ledger = ledgers[t.person];
-      if (t.type === 'lent') ledger.netBalance += Number(t.amount);
-      if (t.type === 'borrowed') ledger.netBalance -= Number(t.amount);
-      if (t.type === 'settle_received') ledger.netBalance -= Number(t.amount);
-      if (t.type === 'settle_gave') ledger.netBalance += Number(t.amount);
-      
-      ledger.history.push(t);
-    });
-    return ledgers;
-  }, [transactions]);
-
-  const totalOwedToMe = Object.values(friendLedgers).filter(l => l.netBalance > 0).reduce((acc, l) => acc + l.netBalance, 0);
-  const totalIOwe = Object.values(friendLedgers).filter(l => l.netBalance < 0).reduce((acc, l) => acc + Math.abs(l.netBalance), 0);
 
   if (loading) return <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>Loading...</div>;
 
@@ -213,35 +269,44 @@ export default function App() {
     const totalWasted = sharedData.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
     return (
       <div className={`min-h-screen p-4 md:p-8 ${darkMode ? 'bg-gray-950 text-gray-100' : 'bg-gray-50 text-gray-900'}`}>
-         <div className="max-w-3xl mx-auto space-y-6">
+         <div className="max-w-2xl mx-auto space-y-6">
             <div className="text-center space-y-2 mb-8">
-               <div className="flex justify-center text-rose-500 mb-4"><Wine size={48} /></div>
-               <h1 className="text-3xl font-black tracking-tight">Shared Expense Report</h1>
-               <p className="opacity-70">From {new Date(shareStart).toLocaleDateString()} to {new Date(shareEnd).toLocaleDateString()}</p>
+               <div className="flex justify-center text-rose-500 mb-4"><Wine size={56} /></div>
+               <h1 className="text-3xl font-black tracking-tight">Wasted Report</h1>
+               <p className="opacity-70 font-medium">
+                  {shareStart === '2000-01-01' ? 'Lifetime History' : `${new Date(shareStart).toLocaleDateString('en-GB')} to ${new Date(shareEnd).toLocaleDateString('en-GB')}`}
+               </p>
             </div>
-            <div className={`p-6 rounded-2xl text-center shadow-lg ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-200'}`}>
-               <div className="text-sm opacity-60 mb-2">Total Wasted in Period</div>
-               <div className="text-4xl font-bold text-rose-500">₹{totalWasted.toLocaleString('en-IN')}</div>
+            <div className={`p-8 rounded-3xl text-center shadow-xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-200'}`}>
+               <div className="text-sm opacity-60 mb-2 font-bold uppercase tracking-widest">Total Wasted</div>
+               <div className="text-5xl font-black text-rose-500 tracking-tighter">₹{totalWasted.toLocaleString('en-IN')}</div>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-3 pt-4">
                {sharedData.length === 0 ? (
-                  <div className="text-center opacity-50 py-8">No expenses logged in this period.</div>
+                  <div className="text-center opacity-50 py-12 border-2 border-dashed rounded-3xl border-gray-500/20">No expenses logged in this period.</div>
                ) : (
-                  sharedData.map(t => (
-                     <div key={t.id} className={`flex justify-between p-4 rounded-xl border ${darkMode ? 'border-gray-800 bg-gray-900' : 'border-gray-200 bg-white'}`}>
-                        <div>
-                           <div className="font-bold">{t.reason || t.tag || t.type}</div>
-                           <div className="text-xs opacity-60 mt-1">{new Date(t.date).toLocaleDateString()} &bull; {t.tag || t.type}</div>
+                  sharedData.map(t => {
+                     const isExp = t.type === 'expense' || t.type === 'borrowed';
+                     const tagCfg = settings.tags.find(x => x.name === t.tag) || { color: '#888' };
+                     const color = isExp ? tagCfg.color : '#22c55e';
+                     return (
+                     <div key={t.id} className={`flex justify-between items-center p-5 rounded-2xl border ${darkMode ? 'border-gray-800 bg-gray-900/50' : 'border-gray-200 bg-white'}`}>
+                        <div className="flex gap-4 items-center">
+                           <div className="w-2 h-10 rounded-full" style={{backgroundColor: color}}></div>
+                           <div>
+                              <div className="font-bold text-lg">{t.reason || t.tag || t.type}</div>
+                              <div className="text-xs opacity-60 mt-1">{new Date(t.date).toLocaleDateString('en-GB')} &bull; {t.tag || t.type}</div>
+                           </div>
                         </div>
-                        <div className={`font-bold ${['income', 'settle_received', 'lent'].includes(t.type) ? 'text-emerald-500' : 'text-rose-500'}`}>
+                        <div className={`font-black text-xl ${['income', 'settle_received', 'lent'].includes(t.type) ? 'text-emerald-500' : (darkMode ? 'text-white' : 'text-gray-900')}`}>
                            ₹{Number(t.amount).toLocaleString('en-IN')}
                         </div>
                      </div>
-                  ))
+                  )})
                )}
             </div>
-            <div className="text-center mt-8 pb-8">
-               <button onClick={() => window.location.href = '/'} className="text-rose-500 font-bold hover:underline">Build your own tracker</button>
+            <div className="text-center mt-12 pb-12">
+               <button onClick={() => window.location.href = '/'} className="px-6 py-3 rounded-full bg-rose-500/10 text-rose-500 font-bold hover:bg-rose-500/20 transition-colors">Build your own tracker</button>
             </div>
          </div>
       </div>
@@ -251,13 +316,13 @@ export default function App() {
   if (!isSharedMode && (!user || (user.isAnonymous && typeof __initial_auth_token === 'undefined'))) {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-4 ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>
-        <div className={`max-w-md w-full p-8 rounded-2xl shadow-xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+        <div className={`max-w-md w-full p-8 rounded-3xl shadow-2xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
           <div className="flex justify-center mb-6 text-rose-500">
-            <Wine size={48} />
+            <Wine size={56} />
           </div>
-          <h1 className="text-3xl font-black text-center mb-2 tracking-tight">WASTED</h1>
-          <p className="text-center mb-8 opacity-70">Track where your money vanishes.</p>
-          <button onClick={handleGoogleLogin} className="w-full py-3 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
+          <h1 className="text-4xl font-black text-center mb-2 tracking-tighter">WASTED</h1>
+          <p className="text-center mb-10 opacity-70 font-medium">Track where your money vanishes.</p>
+          <button onClick={handleGoogleLogin} className="w-full py-4 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-bold transition-transform hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 shadow-lg shadow-rose-500/20">
             Continue with Google
           </button>
         </div>
@@ -277,14 +342,14 @@ export default function App() {
         </div>
         <nav className="flex-1 space-y-2">
           <NavItem icon={<LayoutDashboard />} label="Dashboard" active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} dark={darkMode} />
-          <NavItem icon={<PieChartIcon />} label="Analytics" active={currentView === 'analytics'} onClick={() => setCurrentView('analytics')} dark={darkMode} />
+          <NavItem icon={<PieChartIcon />} label="Analytics" active={currentView === 'analytics' || currentView === 'tagDetails'} onClick={() => setCurrentView('analytics')} dark={darkMode} />
           <NavItem icon={<HandCoins />} label="Debts & IOUs" active={currentView === 'debts'} onClick={() => setCurrentView('debts')} dark={darkMode} />
         </nav>
         <div className="pt-4 border-t border-gray-700/30 flex justify-between items-center px-2">
           <button onClick={toggleTheme} className={`p-2 rounded-lg ${darkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600'}`}>
             {darkMode ? <Sun size={20} /> : <Moon size={20} />}
           </button>
-          <div className="text-xs opacity-50 truncate max-w-[120px]">{user.email || 'Anonymous'}</div>
+          <div className="text-xs font-bold opacity-50 truncate max-w-[120px]">{user.email || 'Anonymous'}</div>
         </div>
       </aside>
 
@@ -294,45 +359,63 @@ export default function App() {
           <button onClick={toggleTheme} className="p-2">{darkMode ? <Sun size={20} /> : <Moon size={20} />}</button>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 relative">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
-            <h1 className="text-2xl font-bold capitalize">
-              {currentView === 'tagDetails' ? `${selectedTagDetail} History` : currentView}
-            </h1>
-            <div className="flex items-center gap-3">
-              <div className={`flex items-center px-3 py-2 rounded-lg border ${darkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}>
-                <Search size={16} className="opacity-50 mr-2" />
-                <input 
-                  type="text" placeholder="Search..." value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="bg-transparent border-none outline-none text-sm w-24 md:w-48"
-                />
-              </div>
-              <button onClick={() => setShowShareModal(true)} title="Share Custom Period" className={`p-2 rounded-lg border flex items-center gap-2 ${darkMode ? 'bg-rose-900/30 text-rose-400 border-rose-800/50 hover:bg-rose-900/50' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}>
-                <Share2 size={18} /> <span className="hidden md:inline text-sm font-medium">Share</span>
-              </button>
-            </div>
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 relative">
+          
+          {/* Global Top Bar: Search & Time Filter */}
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
+             <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full xl:w-auto">
+                <div className={`flex items-center p-1 rounded-xl border ${darkMode ? 'bg-gray-900/50 border-gray-800' : 'bg-gray-100 border-gray-200'}`}>
+                   {['lifetime', 'monthly', 'weekly', 'custom'].map(tf => (
+                      <button 
+                         key={tf} onClick={() => setTimeFilter(tf)} 
+                         className={`px-3 py-1.5 md:px-4 md:py-2 rounded-lg text-xs md:text-sm font-bold capitalize transition-all ${timeFilter === tf ? (darkMode ? 'bg-gray-800 text-white shadow' : 'bg-white text-gray-900 shadow') : 'opacity-60 hover:opacity-100'}`}
+                      >
+                         {tf}
+                      </button>
+                   ))}
+                </div>
+                
+                {timeFilter === 'custom' && (
+                   <div className="flex items-center gap-2">
+                      <input type="date" value={customDate.start} onChange={e=>setCustomDate({...customDate, start: e.target.value})} className={`p-2 text-sm rounded-lg border outline-none ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-300'}`}/>
+                      <span className="opacity-50 text-sm">to</span>
+                      <input type="date" value={customDate.end} onChange={e=>setCustomDate({...customDate, end: e.target.value})} className={`p-2 text-sm rounded-lg border outline-none ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-300'}`}/>
+                   </div>
+                )}
+             </div>
+
+             <div className="flex items-center gap-3">
+                <div className={`flex flex-1 xl:flex-none items-center px-3 py-2 rounded-xl border ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}>
+                   <Search size={16} className="opacity-50 mr-2" />
+                   <input type="text" placeholder="Search entries..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-transparent border-none outline-none text-sm w-full xl:w-48" />
+                </div>
+                <button onClick={() => setShowShareModal(true)} title="Share this Report" className={`p-2.5 rounded-xl border flex items-center gap-2 ${darkMode ? 'bg-rose-900/30 text-rose-400 border-rose-800/50 hover:bg-rose-900/50' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}>
+                   <Share2 size={18} /> <span className="hidden sm:inline text-sm font-bold">Share Report</span>
+                </button>
+             </div>
           </div>
 
           {currentView === 'dashboard' && <DashboardView 
-            balance={currentBalance} income={totalIncome} expense={totalExpense} 
-            transactions={filteredTransactions} addTx={addTransaction} deleteTx={deleteTransaction} editTx={setEditingTransaction}
-            settings={settings} updateSettings={updateSettings} cardClasses={cardClasses} dark={darkMode}
+            balance={lifetimeBalance} income={periodIncome} expense={periodWasted} 
+            transactions={displayTransactions} addTx={addTransaction} deleteTx={deleteTransaction} editTx={setEditingTransaction}
+            settings={settings} updateSettings={updateSettings} cardClasses={cardClasses} dark={darkMode} dateBounds={dateBounds}
           />}
           
           {currentView === 'analytics' && <AnalyticsView 
-            transactions={transactions} settings={settings}
+            transactions={dateFilteredTransactions} settings={settings} dateBounds={dateBounds}
             onTagClick={(tag) => { setSelectedTagDetail(tag); setCurrentView('tagDetails'); }}
             cardClasses={cardClasses} dark={darkMode}
           />}
           
           {currentView === 'debts' && <DebtsView 
-            friendLedgers={friendLedgers} addTx={addTransaction} editTx={setEditingTransaction} deleteTx={deleteTransaction}
-            owedToMe={totalOwedToMe} iOwe={totalIOwe} settings={settings} updateSettings={updateSettings} cardClasses={cardClasses} dark={darkMode}
+            friendLedgers={friendLedgers} owedToMe={totalOwedToMe} iOwe={totalIOwe}
+            addTx={addTransaction} settings={settings} updateSettings={updateSettings} 
+            cardClasses={cardClasses} dark={darkMode}
           />}
 
           {currentView === 'tagDetails' && <TagDetailsView 
-            tag={selectedTagDetail} transactions={transactions} settings={settings} editTx={setEditingTransaction} deleteTx={deleteTransaction}
+            tag={selectedTagDetail} transactions={dateFilteredTransactions} settings={settings} 
+            editTx={setEditingTransaction} deleteTx={deleteTransaction} dateBounds={dateBounds}
             onBack={() => { setSelectedTagDetail(null); setCurrentView('analytics'); }} cardClasses={cardClasses} dark={darkMode}
           />}
         </div>
@@ -345,34 +428,35 @@ export default function App() {
       </main>
 
       {/* Global Modals */}
-      {showShareModal && <ShareModal user={user} onClose={() => setShowShareModal(false)} dark={darkMode} />}
+      {showShareModal && <ShareModal user={user} currentBounds={dateBounds} onClose={() => setShowShareModal(false)} dark={darkMode} />}
       {editingTransaction && <EditTransactionModal tx={editingTransaction} settings={settings} onSave={updateTransaction} onClose={() => setEditingTransaction(null)} dark={darkMode} />}
     </div>
   );
 }
 
 const NavItem = ({ icon, label, active, onClick, dark }) => (
-  <button onClick={onClick} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-    active ? (dark ? 'bg-rose-500/10 text-rose-400' : 'bg-rose-50 text-rose-600') : (dark ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600')
+  <button onClick={onClick} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold ${
+    active ? (dark ? 'bg-rose-500/15 text-rose-400' : 'bg-rose-50 text-rose-600') : (dark ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600')
   }`}>
-    {icon} <span className="font-medium">{label}</span>
+    {icon} <span>{label}</span>
   </button>
 );
 
 const MobileNavItem = ({ icon, active, onClick, dark }) => (
   <button onClick={onClick} className={`p-3 rounded-xl ${
-    active ? (dark ? 'text-rose-400 bg-rose-500/10' : 'text-rose-600 bg-rose-50') : (dark ? 'text-gray-500' : 'text-gray-400')
+    active ? (dark ? 'text-rose-400 bg-rose-500/15' : 'text-rose-600 bg-rose-50') : (dark ? 'text-gray-500' : 'text-gray-400')
   }`}>
     {icon}
   </button>
 );
 
-const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx, editTx, settings, updateSettings, cardClasses, dark }) => {
+
+const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx, editTx, settings, updateSettings, cardClasses, dark, dateBounds }) => {
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [tag, setTag] = useState(settings.tags[0]?.name || '');
   const [person, setPerson] = useState(settings.friends[0]?.name || '');
-  const [type, setType] = useState('expense'); // expense, income, borrowed, lent
+  const [type, setType] = useState('expense'); 
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   
   const [showTagModal, setShowTagModal] = useState(false);
@@ -382,7 +466,6 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!amount) return;
-    
     const txData = { amount: Number(amount), type, date, reason };
     
     if (type === 'expense' || type === 'borrowed') {
@@ -401,107 +484,107 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className={`p-6 rounded-2xl ${cardClasses}`}>
-          <div className="text-sm opacity-60 mb-1">Total Bank Balance</div>
-          <div className={`text-3xl font-bold ${balance >= 0 ? (dark ? 'text-white' : 'text-gray-900') : 'text-rose-500'}`}>
+        <div className={`p-6 rounded-3xl ${cardClasses}`}>
+          <div className="text-sm font-bold opacity-60 mb-1 tracking-wider uppercase">Lifetime Bank Balance</div>
+          <div className={`text-4xl font-black tracking-tight ${balance >= 0 ? (dark ? 'text-white' : 'text-gray-900') : 'text-rose-500'}`}>
             ₹{balance.toLocaleString('en-IN')}
           </div>
         </div>
-        <div className={`p-6 rounded-2xl ${cardClasses}`}>
-          <div className="flex items-center gap-2 text-sm opacity-60 mb-1"><ArrowDownRight size={16} className="text-emerald-500"/> Total Income</div>
-          <div className="text-2xl font-bold text-emerald-500">₹{income.toLocaleString('en-IN')}</div>
+        <div className={`p-6 rounded-3xl ${cardClasses}`}>
+          <div className="flex items-center gap-2 text-sm font-bold opacity-60 mb-1 tracking-wider uppercase"><ArrowDownRight size={16} className="text-emerald-500"/> Income ({dateBounds.label})</div>
+          <div className="text-3xl font-black text-emerald-500 tracking-tight">₹{income.toLocaleString('en-IN')}</div>
         </div>
-        <div className={`p-6 rounded-2xl ${cardClasses}`}>
-          <div className="flex items-center gap-2 text-sm opacity-60 mb-1"><ArrowUpRight size={16} className="text-rose-500"/> Total Wasted</div>
-          <div className="text-2xl font-bold text-rose-500">₹{expense.toLocaleString('en-IN')}</div>
+        <div className={`p-6 rounded-3xl ${cardClasses}`}>
+          <div className="flex items-center gap-2 text-sm font-bold opacity-60 mb-1 tracking-wider uppercase"><ArrowUpRight size={16} className="text-rose-500"/> Wasted ({dateBounds.label})</div>
+          <div className="text-3xl font-black text-rose-500 tracking-tight">₹{expense.toLocaleString('en-IN')}</div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="space-y-6 lg:col-span-1">
-          <div className={`p-6 rounded-2xl ${cardClasses}`}>
-            <h3 className="font-bold mb-4">Log Transaction</h3>
-            <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <div className="space-y-6 xl:col-span-1">
+          <div className={`p-6 rounded-3xl ${cardClasses}`}>
+            <h3 className="font-bold text-xl mb-5">Log Entry</h3>
+            <form onSubmit={handleSubmit} className="space-y-5">
               
-              <div className="grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => setType('expense')} className={`py-2 text-sm font-medium rounded-lg transition-colors ${type === 'expense' ? 'bg-rose-500 text-white' : (dark ? 'bg-gray-800' : 'bg-gray-100')}`}>Expense</button>
-                <button type="button" onClick={() => setType('income')} className={`py-2 text-sm font-medium rounded-lg transition-colors ${type === 'income' ? 'bg-emerald-500 text-white' : (dark ? 'bg-gray-800' : 'bg-gray-100')}`}>Income</button>
-                <button type="button" onClick={() => setType('borrowed')} className={`py-2 text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'borrowed' ? 'bg-amber-500 text-white' : (dark ? 'bg-gray-800' : 'bg-gray-100')}`}><Ghost size={14}/> Borrowed</button>
-                <button type="button" onClick={() => setType('lent')} className={`py-2 text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'lent' ? 'bg-indigo-500 text-white' : (dark ? 'bg-gray-800' : 'bg-gray-100')}`}><HandCoins size={14}/> Lent</button>
+              <div className="grid grid-cols-2 gap-2 p-1 bg-gray-500/10 rounded-xl">
+                <button type="button" onClick={() => setType('expense')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'expense' ? 'bg-rose-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Expense</button>
+                <button type="button" onClick={() => setType('income')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'income' ? 'bg-emerald-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Income</button>
+                <button type="button" onClick={() => setType('borrowed')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'borrowed' ? 'bg-amber-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><Ghost size={14}/> Borrowed</button>
+                <button type="button" onClick={() => setType('lent')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'lent' ? 'bg-indigo-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><HandCoins size={14}/> Lent</button>
               </div>
               
-              <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (₹)" className={`w-full p-4 text-lg rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} required />
+              <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (₹)" className={`w-full p-4 text-xl font-bold rounded-2xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} required />
               
               {(type === 'expense' || type === 'borrowed') && (
                 <div>
-                  <label className="text-xs font-medium opacity-60 mb-2 block">Category Tag</label>
+                  <div className="flex justify-between items-center mb-2">
+                     <label className="text-xs font-bold opacity-60">Category Tag</label>
+                     <button type="button" onClick={() => setShowTagModal(true)} className="text-xs font-bold text-rose-500 hover:underline">Manage Tags</button>
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {settings.tags.map(t => (
                       <button 
                         key={t.id} type="button" onClick={() => setTag(t.name)}
-                        className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${tag === t.name ? 'ring-2 ring-offset-2 ring-rose-500 scale-105' : 'opacity-80 hover:opacity-100'}`}
-                        style={{ backgroundColor: t.color, color: '#fff' }}
+                        className={`px-3 py-1.5 rounded-full text-sm font-bold transition-all ${tag === t.name ? 'ring-2 ring-offset-2 ring-gray-400 scale-105' : 'opacity-80 hover:opacity-100 hover:scale-105'}`}
+                        style={{ backgroundColor: t.color, color: '#fff', outline: 'none' }}
                       >
                         {t.name}
                       </button>
                     ))}
-                    <button type="button" onClick={() => setShowTagModal(true)} className={`px-3 py-1.5 rounded-full text-sm font-medium border border-dashed flex items-center gap-1 ${dark ? 'border-gray-600 text-gray-300 hover:bg-gray-800' : 'border-gray-400 text-gray-600 hover:bg-gray-100'}`}>
-                      <Settings size={14}/> Edit Tags
-                    </button>
                   </div>
                 </div>
               )}
 
               {(type === 'borrowed' || type === 'lent') && (
                  <div>
-                    <label className="text-xs font-medium opacity-60 mb-2 block">Friend</label>
-                    <div className="flex gap-2">
-                       <select value={person} onChange={e=>setPerson(e.target.value)} className={`flex-1 p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'} outline-none`}>
-                          <option value="" disabled>Select Friend</option>
-                          {settings.friends.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
-                       </select>
-                       <button type="button" onClick={() => setShowFriendModal(true)} className={`p-3 rounded-xl border flex items-center justify-center ${dark ? 'border-gray-600 text-gray-300 hover:bg-gray-800' : 'border-gray-400 hover:bg-gray-100'}`}>
-                          <Users size={18}/>
-                       </button>
+                    <div className="flex justify-between items-center mb-2">
+                       <label className="text-xs font-bold opacity-60">Friend / Person</label>
+                       <button type="button" onClick={() => setShowFriendModal(true)} className="text-xs font-bold text-rose-500 hover:underline">Manage Friends</button>
                     </div>
+                    <select value={person} onChange={e=>setPerson(e.target.value)} className={`w-full p-3 font-bold rounded-xl border ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'} outline-none`}>
+                       <option value="" disabled>Select a person...</option>
+                       {settings.friends.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                    </select>
                  </div>
               )}
 
-              <input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="Extended Reason (Optional)" className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
+              <input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason (Optional)" className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} className={`w-full p-3 rounded-xl border font-medium ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
               
-              <button type="submit" className={`w-full py-3 text-white rounded-xl font-bold transition-colors bg-rose-600 hover:bg-rose-700`}>
-                Save Entry
+              <button type="submit" className={`w-full py-4 text-white rounded-2xl font-black text-lg transition-transform hover:scale-[1.02] active:scale-[0.98] bg-rose-600 hover:bg-rose-700 shadow-lg shadow-rose-500/20`}>
+                Save Transaction
               </button>
             </form>
           </div>
 
-          <div className={`p-6 rounded-2xl ${cardClasses}`}>
+          <div className={`p-6 rounded-3xl ${cardClasses}`}>
             <div className="flex justify-between items-center mb-4">
-               <h3 className="font-bold text-sm opacity-70">Quick Adds</h3>
-               <button onClick={() => setShowQAModal(true)} className="p-1 rounded bg-gray-500/10 hover:bg-gray-500/20 transition-colors"><Plus size={16}/></button>
+               <h3 className="font-bold">Quick Adds</h3>
+               <button onClick={() => setShowQAModal(true)} className="p-1.5 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 transition-colors"><Settings size={16}/></button>
             </div>
             <div className="flex flex-wrap gap-2">
               {settings.quickAdds.map(qa => {
                  const tagConfig = settings.tags.find(t => t.name === qa.tag) || { color: '#888' };
                  return (
-                   <button key={qa.id} onClick={() => addTx({amount: qa.amount, tag: qa.tag, reason: qa.reason, type: 'expense', date: new Date().toISOString().split('T')[0]})} className={`px-4 py-2 rounded-xl text-sm flex flex-col items-start gap-1 transition-transform hover:scale-105 active:scale-95 ${dark ? 'bg-gray-800 border border-gray-700' : 'bg-gray-100 border border-gray-200'}`}>
-                     <span className="font-bold">₹{qa.amount} {qa.tag}</span>
-                     {qa.reason && <span className="text-xs opacity-60 truncate max-w-[100px]">{qa.reason}</span>}
-                     <div className="w-full h-1 mt-1 rounded-full opacity-50" style={{backgroundColor: tagConfig.color}}></div>
+                   <button key={qa.id} onClick={() => addTx({amount: qa.amount, tag: qa.tag, reason: qa.reason, type: 'expense', date: new Date().toISOString().split('T')[0]})} className={`px-4 py-2.5 rounded-2xl text-sm flex flex-col items-start gap-1 transition-transform hover:scale-105 active:scale-95 ${dark ? 'bg-gray-950 border border-gray-800 hover:border-gray-700' : 'bg-white border border-gray-200 shadow-sm hover:border-gray-300'}`}>
+                     <span className="font-black">₹{qa.amount}</span>
+                     <span className="font-medium text-xs opacity-80" style={{color: tagConfig.color}}>{qa.tag}</span>
+                     {qa.reason && <span className="text-[10px] font-medium opacity-60 truncate max-w-[100px]">{qa.reason}</span>}
                    </button>
                  );
               })}
-              {settings.quickAdds.length === 0 && <span className="text-xs opacity-50">No quick adds configured.</span>}
+              {settings.quickAdds.length === 0 && <span className="text-sm font-medium opacity-50">No quick adds configured.</span>}
             </div>
           </div>
         </div>
 
-        <div className={`p-6 rounded-2xl lg:col-span-2 flex flex-col h-full min-h-[500px] max-h-[800px] ${cardClasses}`}>
-          <h3 className="font-bold mb-4">Recent Ledger Activity</h3>
+        <div className={`p-6 rounded-3xl xl:col-span-2 flex flex-col h-[700px] ${cardClasses}`}>
+          <div className="flex justify-between items-center mb-6">
+             <h3 className="font-bold text-xl">Ledger Activity ({dateBounds.label})</h3>
+          </div>
           <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
             {transactions.length === 0 ? (
-              <div className="h-full flex items-center justify-center opacity-50 text-sm">No transactions yet. Start logging!</div>
+              <div className="h-full flex items-center justify-center opacity-50 font-medium">No transactions in this period.</div>
             ) : (
               transactions.map(t => <TransactionRow key={t.id} t={t} settings={settings} dark={dark} onEdit={() => editTx(t)} onDelete={() => deleteTx(t.id)} />)
             )}
@@ -524,7 +607,7 @@ const TransactionRow = ({ t, settings, dark, onEdit, onDelete }) => {
   let sublabel = t.tag;
   let color = '#888';
   let amountPrefix = '-';
-  let amountColor = dark ? 'text-gray-100' : 'text-gray-900';
+  let amountColor = dark ? 'text-white' : 'text-gray-900';
 
   if (t.type === 'expense') {
      color = tagConfig.color;
@@ -555,38 +638,36 @@ const TransactionRow = ({ t, settings, dark, onEdit, onDelete }) => {
   }
 
   return (
-    <div className={`flex items-center justify-between p-4 rounded-xl border group ${dark ? 'border-gray-800 bg-gray-950/50 hover:bg-gray-800' : 'border-gray-100 bg-gray-50/50 hover:bg-gray-100'} transition-colors`}>
+    <div className={`flex items-center justify-between p-4 md:p-5 rounded-2xl border group transition-colors ${dark ? 'border-gray-800 bg-gray-950/40 hover:bg-gray-800' : 'border-gray-100 bg-gray-50/50 hover:bg-white shadow-sm hover:shadow'}`}>
       <div className="flex items-center gap-4">
-        <div className="w-2 h-10 rounded-full" style={{backgroundColor: color}}></div>
+        <div className="w-2.5 h-12 rounded-full" style={{backgroundColor: color}}></div>
         <div>
-          <div className="font-bold flex items-center gap-2">
+          <div className="font-bold text-base md:text-lg flex items-center gap-2">
              {label}
              {t.type === 'borrowed' && <Ghost size={14} className="text-amber-500"/>}
           </div>
-          <div className="text-xs opacity-60 flex items-center gap-2 mt-1">
-            <span>{new Date(t.date).toLocaleDateString('en-GB', {day: '2-digit', month: 'short'})}</span>
-            {sublabel && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium border" style={{borderColor: `${color}55`, color: color}}>{sublabel}</span>}
+          <div className="text-xs font-medium opacity-60 flex items-center gap-2 mt-1">
+            <span>{new Date(t.date).toLocaleDateString('en-GB', {day: '2-digit', month: 'short', year: 'numeric'})}</span>
+            {sublabel && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border" style={{borderColor: `${color}55`, color: color}}>{sublabel}</span>}
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-3">
-        <div className={`font-bold text-lg ${amountColor}`}>
+      <div className="flex items-center gap-4">
+        <div className={`font-black text-lg md:text-xl tracking-tight ${amountColor}`}>
           {amountPrefix}₹{Number(t.amount).toLocaleString('en-IN')}
         </div>
-        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-           <button onClick={onEdit} className="p-2 rounded hover:bg-gray-500/20 text-gray-500"><Pencil size={14}/></button>
-           <button onClick={onDelete} className="p-2 rounded hover:bg-rose-500/20 text-rose-500"><Trash2 size={14}/></button>
+        <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex flex-col md:flex-row gap-1 md:gap-2">
+           <button onClick={onEdit} className="p-2 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 text-gray-500 transition-colors"><Pencil size={14}/></button>
+           <button onClick={onDelete} className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-colors"><Trash2 size={14}/></button>
         </div>
       </div>
     </div>
   )
 }
 
-
-const AnalyticsView = ({ transactions, settings, onTagClick, cardClasses, dark }) => {
+const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardClasses, dark }) => {
   const [hoveredCategory, setHoveredCategory] = useState(null);
   
-  // Wasted includes actual expenses AND borrowed money spent on things.
   const expenses = transactions.filter(t => t.type === 'expense' || t.type === 'borrowed');
   
   const tagDataMap = expenses.reduce((acc, t) => {
@@ -601,79 +682,82 @@ const AnalyticsView = ({ transactions, settings, onTagClick, cardClasses, dark }
     return { name: key, value: tagDataMap[key].total, maxExpenseInTag: tagDataMap[key].maxAmount, color: config.color };
   }).sort((a,b) => b.value - a.value);
 
-  const totalMonthlySpend = pieData.reduce((acc, item) => acc + item.value, 0);
+  const totalSpend = pieData.reduce((acc, item) => acc + item.value, 0);
 
-  const today = new Date();
-  const currentYear = today.getFullYear();
-  const currentMonth = today.getMonth();
-  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-  const firstDayOfWeek = new Date(currentYear, currentMonth, 1).getDay();
-  const calendarDays = Array(firstDayOfWeek).fill(null).concat(Array.from({length: daysInMonth}, (_, i) => i + 1));
-  
+  // Calendar Heatmap Logic - Deriving limits dynamically based on current transactions
   const dailySpend = {};
   expenses.forEach(t => {
     const dateStr = t.date.split('T')[0];
     dailySpend[dateStr] = (dailySpend[dateStr] || 0) + Number(t.amount);
   });
   const maxDailySpend = Math.max(0, ...Object.values(dailySpend));
+  
+  // Decide which month to show. Default to Current Month if lifetime, or the month of the "start" bound.
+  const calBaseDate = dateBounds.start ? new Date(dateBounds.start) : new Date();
+  const currentYear = calBaseDate.getFullYear();
+  const currentMonth = calBaseDate.getMonth();
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+  const firstDayOfWeek = new Date(currentYear, currentMonth, 1).getDay();
+  const calendarDays = Array(firstDayOfWeek).fill(null).concat(Array.from({length: daysInMonth}, (_, i) => i + 1));
+  const monthName = calBaseDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className={`p-6 rounded-2xl ${cardClasses} h-[400px] flex flex-col`}>
-          <h3 className="font-bold mb-4">Wasted by Category</h3>
+        <div className={`p-6 rounded-3xl ${cardClasses} h-[450px] flex flex-col`}>
+          <h3 className="font-bold text-xl mb-4">Wasted by Category</h3>
           {pieData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie data={pieData} cx="50%" cy="50%" innerRadius={80} outerRadius={110} paddingAngle={4} dataKey="value" stroke="none">
+                <Pie data={pieData} cx="50%" cy="50%" innerRadius={90} outerRadius={130} paddingAngle={5} dataKey="value" stroke="none">
                   {pieData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
                 </Pie>
-                <RechartsTooltip formatter={(value) => `₹${value.toLocaleString()}`} contentStyle={{ backgroundColor: dark ? '#1f2937' : '#fff', borderRadius: '12px', border: 'none', color: dark ? '#fff' : '#000', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                <RechartsTooltip formatter={(value) => `₹${value.toLocaleString()}`} contentStyle={{ backgroundColor: dark ? '#111827' : '#fff', borderRadius: '16px', border: dark ? '1px solid #374151' : '1px solid #e5e7eb', color: dark ? '#fff' : '#000', fontWeight: 'bold' }} />
               </PieChart>
             </ResponsiveContainer>
-          ) : <div className="flex-1 flex items-center justify-center opacity-50">No data to display.</div>}
+          ) : <div className="flex-1 flex items-center justify-center opacity-50 font-medium">No expenses to display.</div>}
         </div>
 
-        <div className={`p-6 rounded-2xl ${cardClasses} h-[400px] flex flex-col`}>
-           <h3 className="font-bold mb-4">Category Breakdown</h3>
+        <div className={`p-6 rounded-3xl ${cardClasses} h-[450px] flex flex-col`}>
+           <h3 className="font-bold text-xl mb-4">Category Breakdown</h3>
            <div className="space-y-3 overflow-y-auto pr-2 custom-scrollbar flex-1 relative">
               {pieData.map(item => (
                 <div 
                   key={item.name} 
-                  className="relative flex flex-col gap-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 p-3 rounded-xl transition-colors group"
+                  className="relative flex flex-col gap-1.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800/50 p-4 rounded-2xl transition-colors group"
                   onMouseEnter={() => setHoveredCategory(item.name)}
                   onMouseLeave={() => setHoveredCategory(null)}
                   onClick={() => onTagClick(item.name)}
                 >
                   <div className="flex justify-between items-center text-sm">
-                    <span className="flex items-center gap-3 font-medium">
-                      <span className="w-3 h-3 rounded-full" style={{backgroundColor: item.color}}></span>
+                    <span className="flex items-center gap-3 font-bold text-base">
+                      <span className="w-3 h-3 rounded-full shadow-sm" style={{backgroundColor: item.color}}></span>
                       {item.name}
                     </span>
-                    <span className="font-bold">₹{item.value.toLocaleString()}</span>
+                    <span className="font-black text-lg">₹{item.value.toLocaleString()}</span>
                   </div>
-                  <div className="w-full bg-gray-200 dark:bg-gray-700/50 rounded-full h-1 mt-1">
-                    <div className="h-1 rounded-full transition-all duration-500" style={{ width: `${Math.min((item.value / (totalMonthlySpend || 1)) * 100, 100)}%`, backgroundColor: item.color }}></div>
+                  <div className="w-full bg-gray-200 dark:bg-gray-800 rounded-full h-1.5 mt-1 overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-500 ease-out" style={{ width: `${Math.min((item.value / (totalSpend || 1)) * 100, 100)}%`, backgroundColor: item.color }}></div>
                   </div>
                   
                   {hoveredCategory === item.name && (
-                     <div className="absolute top-full left-0 md:left-auto md:-right-4 w-full md:w-72 mt-2 md:mt-0 p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-2xl rounded-2xl z-50 pointer-events-none">
-                        <div className="text-xs font-bold mb-3 opacity-70 flex justify-between">
+                     <div className="absolute top-full left-0 w-full mt-2 p-5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-2xl rounded-3xl z-50 pointer-events-none">
+                        <div className="text-xs font-black uppercase tracking-wider mb-4 opacity-70 flex justify-between">
                            <span>Top {item.name} Expenses</span>
-                           <span>Click to see all</span>
+                           <span className="text-rose-500">Click to view all</span>
                         </div>
-                        <div className="space-y-3 max-h-48 overflow-hidden">
+                        <div className="space-y-4 max-h-56 overflow-hidden">
                            {expenses.filter(e => e.tag === item.name)
                               .sort((a,b) => b.amount - a.amount)
                               .slice(0, 5)
                               .map(t => (
                                  <div key={t.id}>
-                                    <div className="flex justify-between text-xs mb-1">
-                                       <span className="truncate w-32 font-medium">{t.reason || t.tag} {t.type==='borrowed' && '(Ghost)'}</span>
-                                       <span className="font-bold opacity-80">₹{t.amount}</span>
+                                    <div className="flex justify-between items-center text-sm mb-1.5">
+                                       <span className="truncate max-w-[150px] font-bold">{t.reason || t.tag} {t.type==='borrowed' && '(Ghost)'}</span>
+                                       <span className="font-black opacity-80" style={{color: item.color}}>₹{Number(t.amount).toLocaleString()}</span>
                                     </div>
-                                    <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5">
-                                       <div className="h-1.5 rounded-full" style={{width: `${(t.amount/item.maxExpenseInTag)*100}%`, backgroundColor: item.color}} />
+                                    <div className="w-full bg-gray-100 dark:bg-gray-800/50 rounded-full h-2 overflow-hidden">
+                                       <div className="h-full rounded-full" style={{width: `${(t.amount/item.maxExpenseInTag)*100}%`, backgroundColor: item.color}} />
                                     </div>
                                  </div>
                               ))
@@ -683,32 +767,40 @@ const AnalyticsView = ({ transactions, settings, onTagClick, cardClasses, dark }
                   )}
                 </div>
               ))}
-              {pieData.length === 0 && <div className="opacity-50 text-sm mt-4 text-center">No categories found.</div>}
+              {pieData.length === 0 && <div className="opacity-50 font-medium text-center py-10">No categories found.</div>}
            </div>
         </div>
       </div>
 
-      <div className={`p-6 rounded-2xl ${cardClasses}`}>
-        <h3 className="font-bold mb-6 flex items-center gap-2"><CalendarIcon size={18}/> Spending Heatmap (Current Month)</h3>
-        <div className="grid grid-cols-7 gap-2 md:gap-4 max-w-2xl mx-auto">
-          {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => <div key={d} className="text-center text-xs font-bold opacity-50 mb-2">{d}</div>)}
+      <div className={`p-6 rounded-3xl ${cardClasses}`}>
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+           <h3 className="font-bold text-xl flex items-center gap-3"><CalendarDays size={24} className="text-rose-500"/> Spending Heatmap</h3>
+           <span className="px-4 py-2 bg-gray-100 dark:bg-gray-800 rounded-xl text-sm font-bold opacity-80">{monthName}</span>
+        </div>
+        <div className="grid grid-cols-7 gap-2 md:gap-4 max-w-3xl mx-auto">
+          {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => <div key={d} className="text-center text-xs font-black tracking-widest opacity-50 mb-2 uppercase">{d}</div>)}
           {calendarDays.map((day, idx) => {
-             if (!day) return <div key={`empty-${idx}`} />;
-             const dStr = `${currentYear}-${String(currentMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+             if (!day) return <div key={`empty-${idx}`} className="aspect-square" />;
+             
+             // Build date string correctly adjusting for timezone issues manually
+             const monthStr = String(currentMonth + 1).padStart(2, '0');
+             const dayStr = String(day).padStart(2, '0');
+             const dStr = `${currentYear}-${monthStr}-${dayStr}`;
+             
              const spend = dailySpend[dStr] || 0;
              const intensity = maxDailySpend > 0 ? (spend / maxDailySpend) : 0;
              const hasSpend = spend > 0;
              
              return (
-               <div key={day} className="aspect-square rounded-xl flex flex-col items-center justify-center relative group transition-transform hover:scale-110" 
+               <div key={`day-${day}-${idx}`} className="aspect-square rounded-2xl flex flex-col items-center justify-center relative group transition-transform hover:scale-110 cursor-pointer shadow-sm" 
                     style={{ 
-                      backgroundColor: hasSpend ? `rgba(244, 63, 94, ${intensity * 0.8 + 0.2})` : (dark ? '#1f2937' : '#f3f4f6'),
+                      backgroundColor: hasSpend ? `rgba(244, 63, 94, ${intensity * 0.85 + 0.15})` : (dark ? '#1f2937' : '#f3f4f6'),
                       color: hasSpend ? '#fff' : 'inherit'
                     }}>
-                 <span className="text-sm font-medium">{day}</span>
+                 <span className="text-sm font-bold">{day}</span>
                  {hasSpend && (
-                    <div className="absolute bottom-full mb-2 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 shadow-lg">
-                       ₹{spend.toLocaleString()} spent
+                    <div className="absolute bottom-full mb-3 bg-gray-900 text-white text-sm font-black px-3 py-2 rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 shadow-2xl">
+                       ₹{spend.toLocaleString('en-IN')} spent
                     </div>
                  )}
                </div>
@@ -720,54 +812,53 @@ const AnalyticsView = ({ transactions, settings, onTagClick, cardClasses, dark }
   );
 };
 
-
-const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx, cardClasses, dark }) => {
+const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx, dateBounds, cardClasses, dark }) => {
   const tagExpenses = transactions.filter(t => (t.type === 'expense' || t.type === 'borrowed') && t.tag === tag).sort((a,b) => b.amount - a.amount);
   const maxAmt = Math.max(0, ...tagExpenses.map(t => Number(t.amount)));
   const tagConfig = settings.tags.find(t => t.name === tag) || { color: '#888' };
 
   return (
-     <div className={`p-6 rounded-2xl ${cardClasses} flex flex-col h-[calc(100vh-120px)] relative`}>
-        <div className="flex items-center gap-4 mb-8 border-b pb-4 border-gray-200 dark:border-gray-800">
-           <button onClick={onBack} className="p-2 rounded-xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"><ChevronLeft size={20}/></button>
-           <h2 className="text-2xl font-bold flex items-center gap-3">
-              <span className="w-4 h-4 rounded-full shadow-sm" style={{backgroundColor: tagConfig.color}}></span>
-              {tag} Deep Dive
+     <div className={`p-6 rounded-3xl ${cardClasses} flex flex-col h-[calc(100vh-140px)] relative`}>
+        <div className="flex items-center gap-4 mb-8 pb-6 border-b border-gray-200 dark:border-gray-800">
+           <button onClick={onBack} className="p-3 rounded-2xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"><ChevronLeft size={20}/></button>
+           <h2 className="text-3xl font-black flex items-center gap-3 tracking-tight">
+              <span className="w-5 h-5 rounded-full shadow-md" style={{backgroundColor: tagConfig.color}}></span>
+              {tag} 
+              <span className="opacity-50 text-xl font-bold ml-2 hidden md:inline">({dateBounds.label})</span>
            </h2>
         </div>
         
-        <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto space-y-6 pr-2 custom-scrollbar">
            {tagExpenses.map(t => (
-              <div key={t.id} className="flex flex-col gap-3 p-4 rounded-xl border border-transparent hover:border-gray-200 dark:hover:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900/50 transition-all group">
+              <div key={t.id} className="flex flex-col gap-3 p-5 rounded-2xl border border-transparent hover:border-gray-200 dark:hover:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-all group shadow-sm hover:shadow-md">
                  <div className="flex justify-between items-start">
                     <div>
-                       <div className="font-bold text-lg flex items-center gap-2">
+                       <div className="font-bold text-xl flex items-center gap-2">
                           {t.reason || t.tag}
-                          {t.type === 'borrowed' && <Ghost size={14} className="text-amber-500" title={`Ghost Expense from ${t.person}`} />}
+                          {t.type === 'borrowed' && <Ghost size={16} className="text-amber-500" title={`Ghost Expense from ${t.person}`} />}
                        </div>
-                       <div className="text-xs opacity-60 flex items-center gap-2 mt-1">
-                          <CalendarIcon size={12}/> {new Date(t.date).toLocaleDateString('en-GB', {weekday: 'short', day: '2-digit', month: 'long', year: 'numeric'})}
+                       <div className="text-xs font-medium opacity-60 flex items-center gap-2 mt-1">
+                          <CalendarIcon size={12}/> {new Date(t.date).toLocaleDateString('en-GB', {weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'})}
                        </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                       <div className="font-black text-xl" style={{color: tagConfig.color}}>₹{Number(t.amount).toLocaleString('en-IN')}</div>
-                       <div className="opacity-0 group-hover:opacity-100 flex gap-1">
-                           <button onClick={() => editTx(t)} className="p-2 rounded hover:bg-gray-500/20 text-gray-500"><Pencil size={14}/></button>
-                           <button onClick={() => deleteTx(t.id)} className="p-2 rounded hover:bg-rose-500/20 text-rose-500"><Trash2 size={14}/></button>
+                    <div className="flex items-center gap-4">
+                       <div className="font-black text-2xl tracking-tighter" style={{color: tagConfig.color}}>₹{Number(t.amount).toLocaleString('en-IN')}</div>
+                       <div className="opacity-100 md:opacity-0 group-hover:opacity-100 flex gap-1">
+                           <button onClick={() => editTx(t)} className="p-2 rounded-lg hover:bg-gray-500/20 text-gray-500"><Pencil size={16}/></button>
+                           <button onClick={() => deleteTx(t.id)} className="p-2 rounded-lg hover:bg-rose-500/20 text-rose-500"><Trash2 size={16}/></button>
                        </div>
                     </div>
                  </div>
-                 <div className="w-full bg-gray-200 dark:bg-gray-800 rounded-full h-2.5 overflow-hidden">
+                 <div className="w-full bg-gray-200 dark:bg-gray-800/80 rounded-full h-3 overflow-hidden">
                     <div className="h-full rounded-full transition-all duration-1000 ease-out" style={{width: `${(t.amount/maxAmt)*100}%`, backgroundColor: tagConfig.color}} />
                  </div>
               </div>
            ))}
-           {tagExpenses.length === 0 && <div className="opacity-50 text-center py-20 text-lg">No expenses found for this category.</div>}
+           {tagExpenses.length === 0 && <div className="opacity-50 text-center py-20 font-bold text-lg">No expenses found for this category in this period.</div>}
         </div>
      </div>
   );
 };
-
 
 const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSettings, cardClasses, dark }) => {
   const [selectedFriend, setSelectedFriend] = useState(null);
@@ -777,15 +868,13 @@ const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSetti
 
   const handleSettle = (friendName, netBalance) => {
      if(!settleAmount) return;
-     // If netBalance > 0 (they owe me), and I settle, it means they gave me money (settle_received).
-     // If netBalance < 0 (I owe them), and I settle, it means I gave them money (settle_gave).
      const isReceiving = netBalance > 0; 
      
      addTx({
         type: isReceiving ? 'settle_received' : 'settle_gave',
         amount: Number(settleAmount),
         person: friendName,
-        reason: 'Settle Up',
+        reason: 'Debt Settlement',
         date: new Date().toISOString().split('T')[0]
      });
      setSettleAmount('');
@@ -794,52 +883,55 @@ const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSetti
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className={`p-6 rounded-2xl border-l-4 border-l-emerald-500 ${cardClasses}`}>
-          <div className="text-sm opacity-60 mb-1">Total People Owe Me</div>
-          <div className="text-2xl font-bold text-emerald-500">₹{owedToMe.toLocaleString('en-IN')}</div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className={`p-8 rounded-3xl border-b-4 border-emerald-500 ${cardClasses}`}>
+          <div className="text-sm font-bold uppercase tracking-widest opacity-60 mb-2">Lifetime Owed to Me</div>
+          <div className="text-4xl font-black text-emerald-500 tracking-tight">₹{owedToMe.toLocaleString('en-IN')}</div>
         </div>
-        <div className={`p-6 rounded-2xl border-l-4 border-l-rose-500 ${cardClasses}`}>
-          <div className="text-sm opacity-60 mb-1">Total I Owe People</div>
-          <div className="text-2xl font-bold text-rose-500">₹{iOwe.toLocaleString('en-IN')}</div>
+        <div className={`p-8 rounded-3xl border-b-4 border-rose-500 ${cardClasses}`}>
+          <div className="text-sm font-bold uppercase tracking-widest opacity-60 mb-2">Lifetime I Owe Others</div>
+          <div className="text-4xl font-black text-rose-500 tracking-tight">₹{iOwe.toLocaleString('en-IN')}</div>
         </div>
       </div>
 
-      <div className={`p-6 rounded-2xl ${cardClasses}`}>
-         <div className="flex justify-between items-center mb-6">
-            <h3 className="font-bold">Active Friend Ledgers</h3>
-            <div className="text-xs opacity-60 flex items-center gap-1"><ArrowRightLeft size={14}/> Like Splitwise</div>
+      <div className={`p-6 md:p-8 rounded-3xl ${cardClasses}`}>
+         <div className="flex justify-between items-center mb-8">
+            <h3 className="font-bold text-xl">Active Ledgers</h3>
+            <div className="text-xs font-bold opacity-60 flex items-center gap-2 bg-gray-500/10 px-3 py-1.5 rounded-full"><ArrowRightLeft size={14}/> Auto-Synced with Balance</div>
          </div>
          
          <div className="space-y-4">
-            {activeFriends.length === 0 && <div className="opacity-50 py-10 text-center">No active debts. You're all settled up!</div>}
+            {activeFriends.length === 0 && <div className="opacity-50 py-12 text-center font-bold text-lg border-2 border-dashed border-gray-500/20 rounded-3xl">No active debts. You're all settled up!</div>}
             {activeFriends.map(([friendName, ledger]) => {
                const owesMe = ledger.netBalance > 0;
                const absBal = Math.abs(ledger.netBalance);
                const isSelected = selectedFriend === friendName;
 
                return (
-                  <div key={friendName} className={`p-5 rounded-xl border transition-all ${dark ? 'border-gray-800 bg-gray-950/50' : 'border-gray-100 bg-gray-50/50'}`}>
+                  <div key={friendName} className={`p-6 rounded-3xl border transition-all shadow-sm ${dark ? 'border-gray-800 bg-gray-950/40' : 'border-gray-200 bg-white'}`}>
                      <div className="flex justify-between items-center cursor-pointer" onClick={() => setSelectedFriend(isSelected ? null : friendName)}>
-                        <div className="font-bold text-lg">{friendName}</div>
-                        <div className={`text-right font-bold text-lg ${owesMe ? 'text-emerald-500' : 'text-rose-500'}`}>
-                           {owesMe ? 'Owes you ' : 'You owe '} ₹{absBal.toLocaleString()}
+                        <div className="font-black text-2xl flex items-center gap-3">
+                           <div className={`w-3 h-3 rounded-full ${owesMe ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
+                           {friendName}
+                        </div>
+                        <div className={`text-right font-black text-xl md:text-2xl tracking-tight ${owesMe ? 'text-emerald-500' : 'text-rose-500'}`}>
+                           {owesMe ? 'Owes you ' : 'You owe '} ₹{absBal.toLocaleString('en-IN')}
                         </div>
                      </div>
                      
                      {isSelected && (
-                        <div className="mt-4 pt-4 border-t border-gray-700/30 flex flex-col md:flex-row gap-4 items-center">
-                           <div className="flex-1 w-full text-sm opacity-70">
-                              How much are you settling right now?
+                        <div className="mt-6 pt-6 border-t border-gray-700/30 flex flex-col md:flex-row gap-4 items-center">
+                           <div className="flex-1 w-full text-sm font-bold opacity-70">
+                              Record a partial or full settlement payment:
                            </div>
                            <div className="flex w-full md:w-auto gap-2">
                               <input 
                                  type="number" value={settleAmount} onChange={e=>setSettleAmount(e.target.value)} 
                                  placeholder={`Max ₹${absBal}`} max={absBal}
-                                 className={`w-32 p-2 rounded-lg border outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}
+                                 className={`w-32 p-3 font-bold rounded-xl border outline-none focus:border-indigo-500 ${dark ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-300'}`}
                               />
-                              <button onClick={() => setSettleAmount(absBal)} className="px-3 py-2 text-xs font-bold rounded-lg bg-gray-500/10 hover:bg-gray-500/20">Full</button>
-                              <button onClick={() => handleSettle(friendName, ledger.netBalance)} className="px-4 py-2 font-bold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white">Record</button>
+                              <button onClick={() => setSettleAmount(absBal)} className="px-4 py-3 text-sm font-bold rounded-xl bg-gray-500/10 hover:bg-gray-500/20 transition-colors">Full</button>
+                              <button onClick={() => handleSettle(friendName, ledger.netBalance)} className="px-6 py-3 font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">Settle</button>
                            </div>
                         </div>
                      )}
@@ -872,22 +964,22 @@ const EditTransactionModal = ({ tx, settings, onSave, onClose, dark }) => {
 
    return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
-            <div className="flex justify-between items-center mb-6">
-               <h3 className="font-bold text-xl">Edit Entry</h3>
-               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
+         <div className={`w-full max-w-md p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+            <div className="flex justify-between items-center mb-8">
+               <h3 className="font-black text-2xl tracking-tight">Edit Entry</h3>
+               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20 transition-colors"><X size={20}/></button>
             </div>
             
-            <div className="space-y-4">
+            <div className="space-y-5">
                <div>
-                  <label className="text-xs font-bold opacity-70 block mb-1">Amount</label>
-                  <input type="number" value={formData.amount} onChange={e=>setFormData({...formData, amount: e.target.value})} className={`w-full p-3 rounded-xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
+                  <label className="text-xs font-bold uppercase tracking-wider opacity-70 block mb-2">Amount</label>
+                  <input type="number" value={formData.amount} onChange={e=>setFormData({...formData, amount: e.target.value})} className={`w-full p-4 text-xl font-bold rounded-2xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
                </div>
                
                {(formData.type === 'expense' || formData.type === 'borrowed') && (
                   <div>
-                     <label className="text-xs font-bold opacity-70 block mb-1">Tag</label>
-                     <select value={formData.tag} onChange={e=>setFormData({...formData, tag: e.target.value})} className={`w-full p-3 rounded-xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                     <label className="text-xs font-bold uppercase tracking-wider opacity-70 block mb-2">Tag</label>
+                     <select value={formData.tag} onChange={e=>setFormData({...formData, tag: e.target.value})} className={`w-full p-4 font-bold rounded-2xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
                         {settings.tags.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
                      </select>
                   </div>
@@ -895,24 +987,24 @@ const EditTransactionModal = ({ tx, settings, onSave, onClose, dark }) => {
 
                {['borrowed', 'lent', 'settle_gave', 'settle_received'].includes(formData.type) && (
                   <div>
-                     <label className="text-xs font-bold opacity-70 block mb-1">Friend</label>
-                     <select value={formData.person} onChange={e=>setFormData({...formData, person: e.target.value})} className={`w-full p-3 rounded-xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                     <label className="text-xs font-bold uppercase tracking-wider opacity-70 block mb-2">Person</label>
+                     <select value={formData.person} onChange={e=>setFormData({...formData, person: e.target.value})} className={`w-full p-4 font-bold rounded-2xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
                         {settings.friends.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
                      </select>
                   </div>
                )}
 
                <div>
-                  <label className="text-xs font-bold opacity-70 block mb-1">Reason</label>
-                  <input type="text" value={formData.reason} onChange={e=>setFormData({...formData, reason: e.target.value})} className={`w-full p-3 rounded-xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
+                  <label className="text-xs font-bold uppercase tracking-wider opacity-70 block mb-2">Reason</label>
+                  <input type="text" value={formData.reason} onChange={e=>setFormData({...formData, reason: e.target.value})} className={`w-full p-4 font-bold rounded-2xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
                </div>
 
                <div>
-                  <label className="text-xs font-bold opacity-70 block mb-1">Date</label>
-                  <input type="date" value={formData.date} onChange={e=>setFormData({...formData, date: e.target.value})} className={`w-full p-3 rounded-xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
+                  <label className="text-xs font-bold uppercase tracking-wider opacity-70 block mb-2">Date</label>
+                  <input type="date" value={formData.date} onChange={e=>setFormData({...formData, date: e.target.value})} className={`w-full p-4 font-bold rounded-2xl border outline-none ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
                </div>
                
-               <button onClick={handleSave} className="w-full py-3 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl mt-4">Save Changes</button>
+               <button onClick={handleSave} className="w-full py-4 bg-rose-600 hover:bg-rose-700 text-white font-black text-lg rounded-2xl mt-4 transition-transform hover:scale-[1.02] active:scale-[0.98]">Save Changes</button>
             </div>
          </div>
       </div>
@@ -933,25 +1025,25 @@ const FriendManagerModal = ({ settings, updateSettings, onClose, dark }) => {
 
    return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
-            <div className="flex justify-between items-center mb-6">
-               <h3 className="font-bold text-xl">Manage Friends</h3>
+         <div className={`w-full max-w-md p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+            <div className="flex justify-between items-center mb-8">
+               <h3 className="font-black text-2xl">Manage Friends</h3>
                <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
             </div>
             
-            <div className="space-y-2 max-h-60 overflow-y-auto mb-6 pr-2">
+            <div className="space-y-3 max-h-64 overflow-y-auto mb-8 pr-2 custom-scrollbar">
                {settings.friends.map(f => (
-                  <div key={f.id} className={`flex justify-between items-center p-3 rounded-xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-100 bg-gray-50'}`}>
-                     <span className="font-medium flex items-center gap-2"><Users size={16} className="opacity-50"/> {f.name}</span>
-                     <button onClick={() => deleteFriend(f.id)} className="text-rose-500 text-sm font-bold opacity-70 hover:opacity-100">Remove</button>
+                  <div key={f.id} className={`flex justify-between items-center p-4 rounded-2xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-100 bg-gray-50'}`}>
+                     <span className="font-bold flex items-center gap-3"><Users size={18} className="text-indigo-500"/> {f.name}</span>
+                     <button onClick={() => deleteFriend(f.id)} className="text-rose-500 p-2 rounded-lg hover:bg-rose-500/10 transition-colors"><Trash2 size={16}/></button>
                   </div>
                ))}
-               {settings.friends.length === 0 && <div className="text-sm opacity-50">No friends added yet.</div>}
+               {settings.friends.length === 0 && <div className="text-sm font-medium opacity-50 text-center py-6 border-2 border-dashed border-gray-500/20 rounded-2xl">No friends added yet.</div>}
             </div>
 
             <div className={`p-4 rounded-2xl border flex gap-2 ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-gray-50'}`}>
-               <input type="text" value={newFriend} onChange={e=>setNewFriend(e.target.value)} placeholder="Friend's Name" className={`flex-1 p-2 rounded-lg border outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
-               <button onClick={addFriend} className="px-4 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-bold rounded-lg">Add</button>
+               <input type="text" value={newFriend} onChange={e=>setNewFriend(e.target.value)} placeholder="Friend's Name" className={`flex-1 p-3 font-bold rounded-xl border outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+               <button onClick={addFriend} className="px-6 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-black rounded-xl hover:scale-105 transition-transform">Add</button>
             </div>
          </div>
       </div>
@@ -973,30 +1065,30 @@ const TagManagerModal = ({ settings, updateSettings, onClose, dark }) => {
 
    return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
-            <div className="flex justify-between items-center mb-6">
-               <h3 className="font-bold text-xl">Manage Tags</h3>
+         <div className={`w-full max-w-md p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+            <div className="flex justify-between items-center mb-8">
+               <h3 className="font-black text-2xl">Manage Tags</h3>
                <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
             </div>
             
-            <div className="space-y-3 max-h-60 overflow-y-auto mb-6 pr-2">
+            <div className="space-y-3 max-h-64 overflow-y-auto mb-8 pr-2 custom-scrollbar">
                {settings.tags.map(t => (
-                  <div key={t.id} className={`flex justify-between items-center p-3 rounded-xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-100 bg-gray-50'}`}>
-                     <span className="flex items-center gap-3 font-medium"><span className="w-4 h-4 rounded-full" style={{backgroundColor: t.color}}></span> {t.name}</span>
-                     <button onClick={() => deleteTag(t.id)} className="text-rose-500 text-sm font-bold opacity-70 hover:opacity-100">Remove</button>
+                  <div key={t.id} className={`flex justify-between items-center p-4 rounded-2xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-100 bg-gray-50'}`}>
+                     <span className="flex items-center gap-3 font-bold"><span className="w-4 h-4 rounded-full shadow-sm" style={{backgroundColor: t.color}}></span> {t.name}</span>
+                     <button onClick={() => deleteTag(t.id)} className="text-rose-500 p-2 rounded-lg hover:bg-rose-500/10 transition-colors"><Trash2 size={16}/></button>
                   </div>
                ))}
             </div>
 
-            <div className={`p-4 rounded-2xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-gray-50'}`}>
-               <h4 className="font-bold text-sm mb-3">Add New Tag</h4>
-               <input type="text" value={newTagName} onChange={e=>setNewTagName(e.target.value)} placeholder="Tag Name" className={`w-full p-3 rounded-xl border mb-3 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
-               <div className="flex flex-wrap gap-2 mb-4">
+            <div className={`p-5 rounded-3xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-gray-50'}`}>
+               <h4 className="font-black text-sm uppercase tracking-wider mb-4 opacity-70">Add New Tag</h4>
+               <input type="text" value={newTagName} onChange={e=>setNewTagName(e.target.value)} placeholder="Tag Name" className={`w-full p-4 font-bold rounded-2xl border mb-4 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+               <div className="flex flex-wrap gap-3 mb-6">
                   {PRESET_COLORS.map(c => (
-                     <button key={c} onClick={() => setNewTagColor(c)} className={`w-8 h-8 rounded-full flex items-center justify-center transition-transform ${newTagColor === c ? 'scale-125 ring-2 ring-offset-2 ring-gray-400' : ''}`} style={{backgroundColor: c}}></button>
+                     <button key={c} onClick={() => setNewTagColor(c)} className={`w-8 h-8 rounded-full flex items-center justify-center transition-transform ${newTagColor === c ? 'scale-125 ring-2 ring-offset-2 ring-gray-400' : 'hover:scale-110'}`} style={{backgroundColor: c}}></button>
                   ))}
                </div>
-               <button onClick={addTag} className="w-full py-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-bold rounded-xl">Create Tag</button>
+               <button onClick={addTag} className="w-full py-4 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-black rounded-2xl hover:scale-[1.02] transition-transform">Create Tag</button>
             </div>
          </div>
       </div>
@@ -1019,69 +1111,88 @@ const QuickAddManagerModal = ({ settings, updateSettings, onClose, dark }) => {
 
    return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
-            <div className="flex justify-between items-center mb-6">
-               <h3 className="font-bold text-xl">Manage Quick Adds</h3>
+         <div className={`w-full max-w-md p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+            <div className="flex justify-between items-center mb-8">
+               <h3 className="font-black text-2xl">Manage Quick Adds</h3>
                <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
             </div>
             
-            <div className="flex flex-wrap gap-2 mb-6">
+            <div className="flex flex-wrap gap-2 mb-8">
                {settings.quickAdds.map(qa => (
-                  <div key={qa.id} className={`px-3 py-1.5 rounded-lg flex items-center gap-2 border ${dark ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'}`}>
-                     <span className="text-sm font-medium">₹{qa.amount} {qa.tag}</span>
-                     <button onClick={() => deleteQA(qa.id)} className="text-rose-500 ml-1"><X size={14}/></button>
+                  <div key={qa.id} className={`pl-4 pr-2 py-2 rounded-xl flex items-center gap-3 border shadow-sm ${dark ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'}`}>
+                     <span className="text-sm font-bold">₹{qa.amount} {qa.tag}</span>
+                     <button onClick={() => deleteQA(qa.id)} className="text-rose-500 p-1.5 rounded-lg hover:bg-rose-500/10"><X size={14}/></button>
                   </div>
                ))}
+               {settings.quickAdds.length === 0 && <div className="text-sm font-medium opacity-50 w-full text-center py-4 border-2 border-dashed border-gray-500/20 rounded-xl">No quick adds yet.</div>}
             </div>
 
-            <div className={`p-4 rounded-2xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-gray-50'}`}>
-               <h4 className="font-bold text-sm mb-3">New Quick Add</h4>
-               <input type="number" value={amt} onChange={e=>setAmt(e.target.value)} placeholder="Amount" className={`w-full p-3 rounded-xl border mb-3 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
-               <select value={tag} onChange={e=>setTag(e.target.value)} className={`w-full p-3 rounded-xl border mb-3 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}>
+            <div className={`p-5 rounded-3xl border ${dark ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-gray-50'}`}>
+               <h4 className="font-black text-sm uppercase tracking-wider mb-4 opacity-70">New Quick Add</h4>
+               <input type="number" value={amt} onChange={e=>setAmt(e.target.value)} placeholder="Amount (₹)" className={`w-full p-4 font-bold rounded-2xl border mb-3 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+               <select value={tag} onChange={e=>setTag(e.target.value)} className={`w-full p-4 font-bold rounded-2xl border mb-3 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}>
                   {settings.tags.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
                </select>
-               <input type="text" value={reason} onChange={e=>setReason(e.target.value)} placeholder="Preset Reason (Optional)" className={`w-full p-3 rounded-xl border mb-4 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
-               <button onClick={addQA} className="w-full py-2 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-bold rounded-xl">Save Quick Add</button>
+               <input type="text" value={reason} onChange={e=>setReason(e.target.value)} placeholder="Preset Reason (Optional)" className={`w-full p-4 font-bold rounded-2xl border mb-6 outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+               <button onClick={addQA} className="w-full py-4 bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-black rounded-2xl hover:scale-[1.02] transition-transform">Save Quick Add</button>
             </div>
          </div>
       </div>
    );
 }
 
-const ShareModal = ({ user, onClose, dark }) => {
-   const [start, setStart] = useState('');
-   const [end, setEnd] = useState('');
+const ShareModal = ({ user, currentBounds, onClose, dark }) => {
    const [link, setLink] = useState('');
+   const [copied, setCopied] = useState(false);
+
+   const start = currentBounds.start || '2000-01-01'; // Default for lifetime
+   const end = currentBounds.end || '2100-01-01';     // Default for lifetime
 
    const generate = () => {
-      if(!start || !end) return;
+      // Vercel Proof URL generation using URL params natively. Never 404s.
       const url = `${window.location.origin}/?share=${user.uid}&s=${start}&e=${end}`;
       setLink(url);
    }
 
+   const copyToClipboard = () => {
+      navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+   }
+
    return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-sm p-6 rounded-3xl shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
+         <div className={`w-full max-w-sm p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
             <div className="flex justify-between items-center mb-6">
-               <h3 className="font-bold text-xl">Share Time Period</h3>
-               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
+               <h3 className="font-black text-2xl tracking-tight">Share Report</h3>
+               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20 transition-colors"><X size={20}/></button>
             </div>
-            <div className="space-y-4">
-               <div className="flex gap-4">
-                  <div className="flex-1">
-                     <label className="text-xs font-bold opacity-70 block mb-1">Start Date</label>
-                     <input type="date" value={start} onChange={e=>setStart(e.target.value)} className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'} outline-none focus:border-rose-500`} />
-                  </div>
-                  <div className="flex-1">
-                     <label className="text-xs font-bold opacity-70 block mb-1">End Date</label>
-                     <input type="date" value={end} onChange={e=>setEnd(e.target.value)} className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'} outline-none focus:border-rose-500`} />
-                  </div>
+            
+            <div className="space-y-6">
+               <div className={`p-4 rounded-2xl text-center border-2 border-dashed ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                  <div className="text-xs font-bold uppercase tracking-widest opacity-60 mb-1">Time Period to Share</div>
+                  <div className="font-black text-lg text-rose-500">{currentBounds.label}</div>
+                  {currentBounds.start && (
+                     <div className="text-xs font-medium opacity-60 mt-1">{new Date(currentBounds.start).toLocaleDateString('en-GB')} - {new Date(currentBounds.end).toLocaleDateString('en-GB')}</div>
+                  )}
                </div>
-               <button onClick={generate} className="w-full py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold mt-2">Generate Link</button>
+               
+               <p className="text-sm font-medium opacity-70 text-center px-4">
+                  This will generate a secure, read-only link containing your expenses for the selected period. Your bank balance and debts will remain hidden.
+               </p>
+
+               <button onClick={generate} className="w-full py-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-lg transition-transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-rose-500/20 flex items-center justify-center gap-2">
+                  <LinkIcon size={20}/> Generate Link
+               </button>
+               
                {link && (
-                  <div className="mt-4 p-4 rounded-xl bg-gray-500/10 break-all text-sm flex flex-col gap-2 border border-gray-500/20">
-                     <span className="opacity-70 text-xs font-bold uppercase tracking-wider">Copy this link:</span>
-                     <code className="text-rose-500 font-medium select-all">{link}</code>
+                  <div className="mt-6 p-1 rounded-2xl bg-gray-500/10 border border-gray-500/20 flex flex-col items-center">
+                     <div className="p-4 w-full break-all text-xs md:text-sm font-medium opacity-80 text-center select-all">
+                        {link}
+                     </div>
+                     <button onClick={copyToClipboard} className={`w-full py-3 rounded-xl font-bold transition-colors ${copied ? 'bg-emerald-500 text-white' : (dark ? 'bg-gray-800 hover:bg-gray-700 text-white' : 'bg-white hover:bg-gray-100 text-gray-900 shadow-sm')}`}>
+                        {copied ? 'Copied!' : 'Copy to Clipboard'}
+                     </button>
                   </div>
                )}
             </div>
