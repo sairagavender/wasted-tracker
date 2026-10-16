@@ -1,19 +1,19 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer, 
 } from 'recharts';
 import { 
   LayoutDashboard, PieChart as PieChartIcon, HandCoins,
   Moon, Sun, Search, Share2, ArrowUpRight, ArrowDownRight, 
-  CheckCircle2, Wine, Calendar as CalendarIcon, X, Settings, ChevronLeft, Plus,
-  Pencil, Trash2, Users, Ghost, ArrowRightLeft, CalendarDays, Link as LinkIcon
+  Wine, Calendar as CalendarIcon, X, Settings, ChevronLeft,
+  Pencil, Trash2, Users, Ghost, ArrowRightLeft, CalendarDays, Plus,
+  ClipboardPaste, Copy, Split, CheckCircle2, UserCircle2, ArrowLeft
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 
-const firebaseConfig = {
-
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
   apiKey: "AIzaSyCbof1yuALr5XNbrlpTF8GFDl_qA5wxV9g",
 
   authDomain: "wasted-608fb.firebaseapp.com",
@@ -27,7 +27,6 @@ const firebaseConfig = {
   appId: "1:203014769425:web:0f989470d200c62bcb1ab0",
 
   measurementId: "G-874MN5WBN3"
-
 };
 
 const app = initializeApp(firebaseConfig);
@@ -45,9 +44,7 @@ const DEFAULT_SETTINGS = {
     { id: 't4', name: 'Shopping', color: '#ec4899' },
     { id: 't5', name: 'Drinks', color: '#f43f5e' }
   ],
-  quickAdds: [
-    { id: 'qa1', amount: 20, tag: 'Drinks', reason: 'Tea/Coffee' }
-  ],
+  quickAdds: [],
   friends: []
 };
 
@@ -56,31 +53,31 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
   
-  // Shared URL parsing (Bulletproof against Vercel 404s)
-  const urlParams = new URLSearchParams(window.location.search);
-  const shareUid = urlParams.get('share');
-  const shareStart = urlParams.get('s');
-  const shareEnd = urlParams.get('e');
-  const isSharedMode = !!shareUid;
-  const [sharedData, setSharedData] = useState(null);
-  const [sharedOwnerName, setSharedOwnerName] = useState("Someone");
+  // JSON Shared Mode State
+  const [sharedData, setSharedData] = useState(null); // If not null, we are in shared mode
+  const [showImportModal, setShowImportModal] = useState(false);
   
   // App State
   const [transactions, setTransactions] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   
-  // UI & Time Filter State
+  // UI State
   const [currentView, setCurrentView] = useState('dashboard');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTagDetail, setSelectedTagDetail] = useState(null);
+  const [selectedFriendProfile, setSelectedFriendProfile] = useState(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
   
+  // Advanced Time Filter State
   const [timeFilter, setTimeFilter] = useState('monthly'); // lifetime, monthly, weekly, custom
-  const [customDate, setCustomDate] = useState({ 
-     start: new Date().toISOString().split('T')[0], 
-     end: new Date().toISOString().split('T')[0] 
-  });
+  
+  const now = new Date();
+  const [selectedMonth, setSelectedMonth] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
+  
+  const [customStart, setCustomStart] = useState(new Date().toISOString().split('T')[0]);
+  const [customEnd, setCustomEnd] = useState(new Date().toISOString().split('T')[0]);
+  const [showCustomPicker, setShowCustomPicker] = useState(false);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -90,9 +87,7 @@ export default function App() {
         } else if (typeof __firebase_config !== 'undefined') {
           await signInAnonymously(auth);
         }
-      } catch (err) {
-        console.error("Auth init failed", err);
-      }
+      } catch (err) { console.error("Auth init failed", err); }
     };
     initAuth();
 
@@ -104,29 +99,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // If in Share Mode, we don't need the user to be logged in. We fetch directly.
-    if (isSharedMode) {
-      const txRef = collection(db, 'artifacts', appId, 'users', shareUid, 'transactions');
-      const unsubTx = onSnapshot(txRef, (snapshot) => {
-        const data = snapshot.docs
-          .map(doc => ({ id: doc.id, ...doc.data() }))
-          .filter(t => t.date >= shareStart && t.date <= shareEnd);
-        data.sort((a, b) => new Date(b.date) - new Date(a.date));
-        setSharedData(data);
-      }, (error) => console.error("Error fetching shared tx:", error));
-      
-      // Attempt to get owner's basic settings for tags/name, ignoring errors if missing
-      const settingsRef = doc(db, 'artifacts', appId, 'users', shareUid, 'settings', 'preferences');
-      onSnapshot(settingsRef, (docSnap) => {
-         if(docSnap.exists()) {
-             setSettings({ ...DEFAULT_SETTINGS, ...docSnap.data() });
-         }
-      });
-
-      return () => unsubTx();
-    }
-
-    if (!user) return;
+    if (!user || sharedData) return; // Don't fetch if in shared viewing mode
 
     const userId = user.uid;
     const txRef = collection(db, 'artifacts', appId, 'users', userId, 'transactions');
@@ -134,22 +107,18 @@ export default function App() {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       data.sort((a, b) => new Date(b.date) - new Date(a.date));
       setTransactions(data);
-    }, (error) => console.error("Error fetching tx:", error));
+    });
 
     const settingsRef = doc(db, 'artifacts', appId, 'users', userId, 'settings', 'preferences');
     const unsubSettings = onSnapshot(settingsRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setSettings({ ...DEFAULT_SETTINGS, ...docSnap.data() });
-      } else {
-        setDoc(settingsRef, DEFAULT_SETTINGS);
-      }
-    }, (error) => console.error("Error fetching settings:", error));
+      if (docSnap.exists()) setSettings({ ...DEFAULT_SETTINGS, ...docSnap.data() });
+      else setDoc(settingsRef, DEFAULT_SETTINGS);
+    });
 
     return () => { unsubTx(); unsubSettings(); };
-  }, [user, isSharedMode, shareUid, shareStart, shareEnd]);
+  }, [user, sharedData]);
 
   const dateBounds = useMemo(() => {
-     const today = new Date();
      const formatDate = (d) => {
         const offset = d.getTimezoneOffset() * 60000;
         return new Date(d.getTime() - offset).toISOString().split('T')[0];
@@ -158,7 +127,7 @@ export default function App() {
      if (timeFilter === 'weekly') {
         const d = new Date();
         const day = d.getDay();
-        const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Monday
+        const diff = d.getDate() - day + (day === 0 ? -6 : 1); 
         d.setDate(diff);
         const start = new Date(d);
         const end = new Date(d);
@@ -167,51 +136,52 @@ export default function App() {
      }
      
      if (timeFilter === 'monthly') {
-        const start = new Date(today.getFullYear(), today.getMonth(), 1);
-        const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-        return { start: formatDate(start), end: formatDate(end), label: 'This Month' };
+        const [year, month] = selectedMonth.split('-');
+        const start = new Date(year, month - 1, 1);
+        const end = new Date(year, month, 0); // Last day of month
+        return { start: formatDate(start), end: formatDate(end), label: start.toLocaleString('default', { month: 'long', year: 'numeric' }) };
      }
      
      if (timeFilter === 'custom') {
-        return { start: customDate.start, end: customDate.end, label: 'Custom Period' };
+        return { start: customStart, end: customEnd, label: `${new Date(customStart).toLocaleDateString('en-GB')} to ${new Date(customEnd).toLocaleDateString('en-GB')}` };
      }
      
      return { start: null, end: null, label: 'Lifetime' };
-  }, [timeFilter, customDate]);
+  }, [timeFilter, selectedMonth, customStart, customEnd]);
 
-  // The transactions filtered by the selected TIME PERIOD
+  const activeTransactions = sharedData ? sharedData.transactions : transactions;
+  const activeSettings = sharedData ? sharedData.settings : settings;
+
   const dateFilteredTransactions = useMemo(() => {
-     let filtered = transactions;
+     let filtered = activeTransactions;
      if (dateBounds.start) filtered = filtered.filter(t => t.date >= dateBounds.start);
      if (dateBounds.end) filtered = filtered.filter(t => t.date <= dateBounds.end);
      return filtered;
-  }, [transactions, dateBounds]);
+  }, [activeTransactions, dateBounds]);
 
-  // The transactions filtered by Time Period AND Search Query (for display lists)
   const displayTransactions = useMemo(() => {
     if (!searchQuery) return dateFilteredTransactions;
+    const query = searchQuery.toLowerCase();
     return dateFilteredTransactions.filter(t => 
-      (t.reason || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
-      (t.tag || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (t.person || '').toLowerCase().includes(searchQuery.toLowerCase())
+      (t.reason || '').toLowerCase().includes(query) || 
+      (t.tag || '').toLowerCase().includes(query) ||
+      (t.person || '').toLowerCase().includes(query) ||
+      (t.type || '').toLowerCase().includes(query)
     );
   }, [dateFilteredTransactions, searchQuery]);
 
-  // NOTE: Bank Balance is ALWAYS LIFETIME. It makes no sense to have a "weekly" bank balance.
-  const lifetimeBalance = transactions.reduce((acc, t) => {
+  const lifetimeBalance = activeTransactions.reduce((acc, t) => {
     if (t.type === 'income' || t.type === 'settle_received') return acc + Number(t.amount);
     if (t.type === 'expense' || t.type === 'lent' || t.type === 'settle_gave') return acc - Number(t.amount);
     return acc; 
   }, 0);
 
-  // Income and Wasted are based on the FILTERED time period.
   const periodIncome = dateFilteredTransactions.filter(t => t.type === 'income').reduce((acc, t) => acc + Number(t.amount), 0);
   const periodWasted = dateFilteredTransactions.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
 
-  // Splitwise-style Ledger by Person (ALWAYS LIFETIME for accurate current debts)
   const friendLedgers = useMemo(() => {
     const ledgers = {};
-    transactions.forEach(t => {
+    activeTransactions.forEach(t => {
       if (!t.person) return;
       if (!ledgers[t.person]) ledgers[t.person] = { netBalance: 0, history: [] };
       
@@ -223,18 +193,14 @@ export default function App() {
       ledger.history.push(t);
     });
     return ledgers;
-  }, [transactions]);
+  }, [activeTransactions]);
 
   const totalOwedToMe = Object.values(friendLedgers).filter(l => l.netBalance > 0).reduce((acc, l) => acc + l.netBalance, 0);
   const totalIOwe = Object.values(friendLedgers).filter(l => l.netBalance < 0).reduce((acc, l) => acc + Math.abs(l.netBalance), 0);
 
   const handleGoogleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (error) {
-      await signInAnonymously(auth);
-    }
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); } 
+    catch (e) { await signInAnonymously(auth); }
   };
 
   const updateSettings = async (newSettings) => {
@@ -262,70 +228,49 @@ export default function App() {
     await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id));
   };
 
+  const handleImportJSON = (jsonString) => {
+    try {
+      const data = JSON.parse(jsonString);
+      if (data.transactions && data.settings) {
+        setSharedData(data);
+        setShowImportModal(false);
+      } else throw new Error("Invalid format");
+    } catch (e) {
+      alert("Invalid JSON data. Please paste a valid report block.");
+    }
+  };
 
   if (loading) return <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>Loading...</div>;
 
-  if (isSharedMode && sharedData) {
-    const totalWasted = sharedData.filter(t => t.type === 'expense' || t.type === 'borrowed').reduce((acc, t) => acc + Number(t.amount), 0);
-    return (
-      <div className={`min-h-screen p-4 md:p-8 ${darkMode ? 'bg-gray-950 text-gray-100' : 'bg-gray-50 text-gray-900'}`}>
-         <div className="max-w-2xl mx-auto space-y-6">
-            <div className="text-center space-y-2 mb-8">
-               <div className="flex justify-center text-rose-500 mb-4"><Wine size={56} /></div>
-               <h1 className="text-3xl font-black tracking-tight">Wasted Report</h1>
-               <p className="opacity-70 font-medium">
-                  {shareStart === '2000-01-01' ? 'Lifetime History' : `${new Date(shareStart).toLocaleDateString('en-GB')} to ${new Date(shareEnd).toLocaleDateString('en-GB')}`}
-               </p>
-            </div>
-            <div className={`p-8 rounded-3xl text-center shadow-xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-200'}`}>
-               <div className="text-sm opacity-60 mb-2 font-bold uppercase tracking-widest">Total Wasted</div>
-               <div className="text-5xl font-black text-rose-500 tracking-tighter">₹{totalWasted.toLocaleString('en-IN')}</div>
-            </div>
-            <div className="space-y-3 pt-4">
-               {sharedData.length === 0 ? (
-                  <div className="text-center opacity-50 py-12 border-2 border-dashed rounded-3xl border-gray-500/20">No expenses logged in this period.</div>
-               ) : (
-                  sharedData.map(t => {
-                     const isExp = t.type === 'expense' || t.type === 'borrowed';
-                     const tagCfg = settings.tags.find(x => x.name === t.tag) || { color: '#888' };
-                     const color = isExp ? tagCfg.color : '#22c55e';
-                     return (
-                     <div key={t.id} className={`flex justify-between items-center p-5 rounded-2xl border ${darkMode ? 'border-gray-800 bg-gray-900/50' : 'border-gray-200 bg-white'}`}>
-                        <div className="flex gap-4 items-center">
-                           <div className="w-2 h-10 rounded-full" style={{backgroundColor: color}}></div>
-                           <div>
-                              <div className="font-bold text-lg">{t.reason || t.tag || t.type}</div>
-                              <div className="text-xs opacity-60 mt-1">{new Date(t.date).toLocaleDateString('en-GB')} &bull; {t.tag || t.type}</div>
-                           </div>
-                        </div>
-                        <div className={`font-black text-xl ${['income', 'settle_received', 'lent'].includes(t.type) ? 'text-emerald-500' : (darkMode ? 'text-white' : 'text-gray-900')}`}>
-                           ₹{Number(t.amount).toLocaleString('en-IN')}
-                        </div>
-                     </div>
-                  )})
-               )}
-            </div>
-            <div className="text-center mt-12 pb-12">
-               <button onClick={() => window.location.href = '/'} className="px-6 py-3 rounded-full bg-rose-500/10 text-rose-500 font-bold hover:bg-rose-500/20 transition-colors">Build your own tracker</button>
-            </div>
-         </div>
-      </div>
-    );
-  }
-
-  if (!isSharedMode && (!user || (user.isAnonymous && typeof __initial_auth_token === 'undefined'))) {
+  if (!user && !sharedData) {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-4 ${darkMode ? 'bg-gray-950 text-white' : 'bg-gray-50 text-gray-900'}`}>
         <div className={`max-w-md w-full p-8 rounded-3xl shadow-2xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
-          <div className="flex justify-center mb-6 text-rose-500">
-            <Wine size={56} />
-          </div>
+          <div className="flex justify-center mb-6 text-rose-500"><Wine size={56} /></div>
           <h1 className="text-4xl font-black text-center mb-2 tracking-tighter">WASTED</h1>
           <p className="text-center mb-10 opacity-70 font-medium">Track where your money vanishes.</p>
-          <button onClick={handleGoogleLogin} className="w-full py-4 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-bold transition-transform hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 shadow-lg shadow-rose-500/20">
-            Continue with Google
-          </button>
+          <div className="space-y-4">
+            <button onClick={handleGoogleLogin} className="w-full py-4 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-bold transition-transform hover:scale-[1.02] shadow-lg flex justify-center">
+              Continue with Google
+            </button>
+            <button onClick={() => setShowImportModal(true)} className={`w-full py-4 px-4 border-2 border-dashed rounded-2xl font-bold transition-transform hover:scale-[1.02] flex justify-center items-center gap-2 ${darkMode ? 'border-gray-700 hover:bg-gray-800' : 'border-gray-300 hover:bg-gray-50'}`}>
+              <ClipboardPaste size={18} /> View a Shared Report
+            </button>
+          </div>
         </div>
+        
+        {showImportModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+             <div className={`w-full max-w-lg p-6 rounded-[2rem] shadow-2xl ${darkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+                <div className="flex justify-between items-center mb-4">
+                   <h3 className="font-black text-xl">Paste Shared JSON</h3>
+                   <button onClick={() => setShowImportModal(false)} className="p-2 rounded-full hover:bg-gray-500/20"><X size={20}/></button>
+                </div>
+                <textarea id="import-json" className={`w-full h-48 p-4 rounded-xl font-mono text-sm border outline-none mb-4 ${darkMode ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-300'}`} placeholder='{"transactions": [...]}'></textarea>
+                <button onClick={() => handleImportJSON(document.getElementById('import-json').value)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl">Import & View</button>
+             </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -341,15 +286,15 @@ export default function App() {
           <Wine /> WASTED
         </div>
         <nav className="flex-1 space-y-2">
-          <NavItem icon={<LayoutDashboard />} label="Dashboard" active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} dark={darkMode} />
-          <NavItem icon={<PieChartIcon />} label="Analytics" active={currentView === 'analytics' || currentView === 'tagDetails'} onClick={() => setCurrentView('analytics')} dark={darkMode} />
-          <NavItem icon={<HandCoins />} label="Debts & IOUs" active={currentView === 'debts'} onClick={() => setCurrentView('debts')} dark={darkMode} />
+          <NavItem icon={<LayoutDashboard />} label="Dashboard" active={currentView === 'dashboard'} onClick={() => { setCurrentView('dashboard'); setSelectedFriendProfile(null); }} dark={darkMode} />
+          <NavItem icon={<PieChartIcon />} label="Analytics" active={currentView === 'analytics' || currentView === 'tagDetails'} onClick={() => { setCurrentView('analytics'); setSelectedFriendProfile(null); }} dark={darkMode} />
+          <NavItem icon={<HandCoins />} label="Debts & IOUs" active={currentView === 'debts' || currentView === 'friendProfile'} onClick={() => setCurrentView('debts')} dark={darkMode} />
         </nav>
         <div className="pt-4 border-t border-gray-700/30 flex justify-between items-center px-2">
           <button onClick={toggleTheme} className={`p-2 rounded-lg ${darkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-600'}`}>
             {darkMode ? <Sun size={20} /> : <Moon size={20} />}
           </button>
-          <div className="text-xs font-bold opacity-50 truncate max-w-[120px]">{user.email || 'Anonymous'}</div>
+          <div className="text-xs font-bold opacity-50 truncate max-w-[120px]">{sharedData ? 'Guest Viewer' : (user?.email || 'Anonymous')}</div>
         </div>
       </aside>
 
@@ -361,6 +306,13 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto p-4 md:p-6 relative">
           
+          {sharedData && (
+             <div className="mb-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex justify-between items-center">
+                <span className="font-bold text-amber-600 flex items-center gap-2"><Ghost size={18}/> Viewing Shared Sandbox</span>
+                <button onClick={() => setSharedData(null)} className="px-4 py-2 bg-amber-600 text-white rounded-lg font-bold text-sm">Exit Sandbox</button>
+             </div>
+          )}
+
           {/* Global Top Bar: Search & Time Filter */}
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
              <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full xl:w-auto">
@@ -375,61 +327,75 @@ export default function App() {
                    ))}
                 </div>
                 
+                {timeFilter === 'monthly' && (
+                   <input type="month" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className={`p-2 px-3 text-sm font-bold rounded-xl border outline-none ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-300'}`} />
+                )}
+
                 {timeFilter === 'custom' && (
-                   <div className="flex items-center gap-2">
-                      <input type="date" value={customDate.start} onChange={e=>setCustomDate({...customDate, start: e.target.value})} className={`p-2 text-sm rounded-lg border outline-none ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-300'}`}/>
-                      <span className="opacity-50 text-sm">to</span>
-                      <input type="date" value={customDate.end} onChange={e=>setCustomDate({...customDate, end: e.target.value})} className={`p-2 text-sm rounded-lg border outline-none ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-300'}`}/>
-                   </div>
+                   <button onClick={() => setShowCustomPicker(true)} className={`flex items-center gap-2 p-2 px-4 text-sm font-bold rounded-xl border ${darkMode ? 'bg-gray-900 border-gray-800 hover:bg-gray-800' : 'bg-white border-gray-300 hover:bg-gray-50'}`}>
+                      <CalendarIcon size={16} /> {new Date(customStart).toLocaleDateString('en-GB')} - {new Date(customEnd).toLocaleDateString('en-GB')}
+                   </button>
                 )}
              </div>
 
              <div className="flex items-center gap-3">
                 <div className={`flex flex-1 xl:flex-none items-center px-3 py-2 rounded-xl border ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}>
                    <Search size={16} className="opacity-50 mr-2" />
-                   <input type="text" placeholder="Search entries..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-transparent border-none outline-none text-sm w-full xl:w-48" />
+                   <input type="text" placeholder="Search..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="bg-transparent border-none outline-none text-sm w-full xl:w-48" />
                 </div>
-                <button onClick={() => setShowShareModal(true)} title="Share this Report" className={`p-2.5 rounded-xl border flex items-center gap-2 ${darkMode ? 'bg-rose-900/30 text-rose-400 border-rose-800/50 hover:bg-rose-900/50' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}>
-                   <Share2 size={18} /> <span className="hidden sm:inline text-sm font-bold">Share Report</span>
-                </button>
+                {!sharedData && (
+                   <button onClick={() => setShowShareModal(true)} title="Export JSON Report" className={`p-2.5 rounded-xl border flex items-center gap-2 ${darkMode ? 'bg-rose-900/30 text-rose-400 border-rose-800/50 hover:bg-rose-900/50' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}>
+                      <Share2 size={18} /> <span className="hidden sm:inline text-sm font-bold">Export JSON</span>
+                   </button>
+                )}
              </div>
           </div>
 
+          {/* Views Routing */}
           {currentView === 'dashboard' && <DashboardView 
             balance={lifetimeBalance} income={periodIncome} expense={periodWasted} 
             transactions={displayTransactions} addTx={addTransaction} deleteTx={deleteTransaction} editTx={setEditingTransaction}
-            settings={settings} updateSettings={updateSettings} cardClasses={cardClasses} dark={darkMode} dateBounds={dateBounds}
+            settings={activeSettings} updateSettings={updateSettings} cardClasses={cardClasses} dark={darkMode} dateBounds={dateBounds}
+            readOnly={!!sharedData}
           />}
           
           {currentView === 'analytics' && <AnalyticsView 
-            transactions={dateFilteredTransactions} settings={settings} dateBounds={dateBounds}
+            transactions={dateFilteredTransactions} settings={activeSettings} dateBounds={dateBounds}
             onTagClick={(tag) => { setSelectedTagDetail(tag); setCurrentView('tagDetails'); }}
             cardClasses={cardClasses} dark={darkMode}
           />}
           
           {currentView === 'debts' && <DebtsView 
             friendLedgers={friendLedgers} owedToMe={totalOwedToMe} iOwe={totalIOwe}
-            addTx={addTransaction} settings={settings} updateSettings={updateSettings} 
+            onSelectFriend={(name) => { setSelectedFriendProfile(name); setCurrentView('friendProfile'); }}
             cardClasses={cardClasses} dark={darkMode}
           />}
 
+          {currentView === 'friendProfile' && selectedFriendProfile && <FriendProfileView
+             friendName={selectedFriendProfile} ledger={friendLedgers[selectedFriendProfile]}
+             onBack={() => { setSelectedFriendProfile(null); setCurrentView('debts'); }}
+             addTx={addTransaction} editTx={setEditingTransaction} deleteTx={deleteTransaction}
+             cardClasses={cardClasses} dark={darkMode} readOnly={!!sharedData} settings={activeSettings}
+          />}
+
           {currentView === 'tagDetails' && <TagDetailsView 
-            tag={selectedTagDetail} transactions={dateFilteredTransactions} settings={settings} 
-            editTx={setEditingTransaction} deleteTx={deleteTransaction} dateBounds={dateBounds}
+            tag={selectedTagDetail} transactions={dateFilteredTransactions} settings={activeSettings} 
+            editTx={setEditingTransaction} deleteTx={deleteTransaction} dateBounds={dateBounds} readOnly={!!sharedData}
             onBack={() => { setSelectedTagDetail(null); setCurrentView('analytics'); }} cardClasses={cardClasses} dark={darkMode}
           />}
         </div>
 
         <nav className={`md:hidden flex justify-around p-3 border-t pb-safe ${darkMode ? 'border-gray-800 bg-gray-950' : 'border-gray-200 bg-white'}`}>
-          <MobileNavItem icon={<LayoutDashboard/>} active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} dark={darkMode} />
-          <MobileNavItem icon={<PieChartIcon/>} active={currentView === 'analytics' || currentView === 'tagDetails'} onClick={() => setCurrentView('analytics')} dark={darkMode} />
-          <MobileNavItem icon={<HandCoins/>} active={currentView === 'debts'} onClick={() => setCurrentView('debts')} dark={darkMode} />
+          <MobileNavItem icon={<LayoutDashboard/>} active={currentView === 'dashboard'} onClick={() => { setCurrentView('dashboard'); setSelectedFriendProfile(null); }} dark={darkMode} />
+          <MobileNavItem icon={<PieChartIcon/>} active={currentView === 'analytics' || currentView === 'tagDetails'} onClick={() => { setCurrentView('analytics'); setSelectedFriendProfile(null); }} dark={darkMode} />
+          <MobileNavItem icon={<HandCoins/>} active={currentView === 'debts' || currentView === 'friendProfile'} onClick={() => setCurrentView('debts')} dark={darkMode} />
         </nav>
       </main>
 
       {/* Global Modals */}
-      {showShareModal && <ShareModal user={user} currentBounds={dateBounds} onClose={() => setShowShareModal(false)} dark={darkMode} />}
-      {editingTransaction && <EditTransactionModal tx={editingTransaction} settings={settings} onSave={updateTransaction} onClose={() => setEditingTransaction(null)} dark={darkMode} />}
+      {showShareModal && <JSONShareModal transactions={dateFilteredTransactions} settings={activeSettings} dateBounds={dateBounds} onClose={() => setShowShareModal(false)} dark={darkMode} />}
+      {editingTransaction && !sharedData && <EditTransactionModal tx={editingTransaction} settings={activeSettings} onSave={updateTransaction} onClose={() => setEditingTransaction(null)} dark={darkMode} />}
+      {showCustomPicker && <CustomDateModal start={customStart} end={customEnd} onSave={(s, e) => { setCustomStart(s); setCustomEnd(e); setShowCustomPicker(false); }} onClose={() => setShowCustomPicker(false)} dark={darkMode} />}
     </div>
   );
 }
@@ -450,35 +416,163 @@ const MobileNavItem = ({ icon, active, onClick, dark }) => (
   </button>
 );
 
+const CustomDateModal = ({ start, end, onSave, onClose, dark }) => {
+   const [s, setS] = useState(start);
+   const [e, setE] = useState(end);
 
-const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx, editTx, settings, updateSettings, cardClasses, dark, dateBounds }) => {
+   return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+         <div className={`w-full max-w-sm p-6 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800' : 'bg-white'}`}>
+            <h3 className="font-black text-xl mb-6">Select Date Range</h3>
+            <div className="space-y-4">
+               <div>
+                  <label className="block text-xs font-bold uppercase opacity-60 mb-2">Start Date</label>
+                  <input type="date" value={s} onChange={e=>setS(e.target.value)} className={`w-full p-3 rounded-xl border outline-none font-bold ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
+               </div>
+               <div>
+                  <label className="block text-xs font-bold uppercase opacity-60 mb-2">End Date</label>
+                  <input type="date" value={e} onChange={ev=>setE(ev.target.value)} className={`w-full p-3 rounded-xl border outline-none font-bold ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`} />
+               </div>
+            </div>
+            <div className="flex gap-3 mt-8">
+               <button onClick={onClose} className="flex-1 py-3 rounded-xl font-bold bg-gray-500/10 hover:bg-gray-500/20">Cancel</button>
+               <button onClick={() => onSave(s, e)} className="flex-1 py-3 rounded-xl font-bold bg-rose-600 text-white hover:bg-rose-700">Apply</button>
+            </div>
+         </div>
+      </div>
+   );
+};
+
+const JSONShareModal = ({ transactions, settings, dateBounds, onClose, dark }) => {
+   const [copied, setCopied] = useState(false);
+   
+   const payload = useMemo(() => {
+      // Strip internal IDs and clean up data for sharing
+      const safeTx = transactions.map(({ id, createdAt, ...rest }) => rest);
+      return JSON.stringify({ transactions: safeTx, settings }, null, 2);
+   }, [transactions, settings]);
+
+   const copyToClipboard = () => {
+      navigator.clipboard.writeText(payload);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+   }
+
+   return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+         <div className={`w-full max-w-lg p-6 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
+            <div className="flex justify-between items-center mb-4">
+               <h3 className="font-black text-2xl tracking-tight">Export JSON Report</h3>
+               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20 transition-colors"><X size={20}/></button>
+            </div>
+            <p className="text-sm opacity-70 mb-4">Copy this block and send it. They can paste it on the login screen to view your tracker interactively for the selected period ({dateBounds.label}).</p>
+            
+            <div className={`p-4 rounded-xl border h-48 overflow-y-auto mb-4 font-mono text-xs ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+               <pre>{payload}</pre>
+            </div>
+
+            <button onClick={copyToClipboard} className={`w-full py-4 rounded-2xl font-black text-lg transition-colors flex justify-center items-center gap-2 ${copied ? 'bg-emerald-500 text-white' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}>
+               {copied ? <CheckCircle2 /> : <Copy />}
+               {copied ? 'Copied to Clipboard!' : 'Copy JSON'}
+            </button>
+         </div>
+      </div>
+   )
+}
+
+
+const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx, editTx, settings, updateSettings, cardClasses, dark, dateBounds, readOnly }) => {
+  // Base Form State
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [tag, setTag] = useState(settings.tags[0]?.name || '');
-  const [person, setPerson] = useState(settings.friends[0]?.name || '');
-  const [type, setType] = useState('expense'); 
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [type, setType] = useState('expense'); 
   
+  // Advanced Modals
   const [showTagModal, setShowTagModal] = useState(false);
   const [showQAModal, setShowQAModal] = useState(false);
   const [showFriendModal, setShowFriendModal] = useState(false);
 
+  // Sub-expense State (Itemized)
+  const [subItems, setSubItems] = useState([]);
+  
+  // Lent Splitwise State
+  const [selectedFriends, setSelectedFriends] = useState([]);
+  const [splitMode, setSplitMode] = useState('equal'); // equal, custom
+  const [customSplits, setCustomSplits] = useState({});
+
+  // Reset states when type changes
+  useEffect(() => {
+     setSubItems([]);
+     setSelectedFriends([]);
+     setCustomSplits({});
+  }, [type]);
+
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!amount) return;
-    const txData = { amount: Number(amount), type, date, reason };
-    
-    if (type === 'expense' || type === 'borrowed') {
+    if (!amount || readOnly) return;
+    const totalNum = Number(amount);
+
+    // 1. Handle Complex Splitwise Lent
+    if (type === 'lent') {
+       if (selectedFriends.length === 0) return alert("Select at least one friend.");
+       let totalSplit = 0;
+       
+       selectedFriends.forEach(f => {
+          let share = splitMode === 'equal' ? (totalNum / selectedFriends.length) : (Number(customSplits[f]) || 0);
+          totalSplit += share;
+          if (share > 0) {
+             addTx({ type: 'lent', amount: share, person: f, reason: reason || 'Split Bill', date });
+          }
+       });
+
+       if (splitMode === 'custom' && Math.abs(totalSplit - totalNum) > 0.01) {
+          alert(`Custom splits (₹${totalSplit}) do not match total amount (₹${totalNum}).`);
+          return;
+       }
+    } 
+    // 2. Handle Sub-itemized Expenses
+    else if (type === 'expense' && subItems.length > 0) {
        if (!tag) return alert("Please select a tag.");
-       txData.tag = tag;
-    }
-    if (type === 'borrowed' || type === 'lent') {
-       if (!person) return alert("Please select a person.");
-       txData.person = person;
+       let subTotal = 0;
+       subItems.forEach(item => {
+          const itemAmt = Number(item.amount);
+          if (itemAmt > 0 && item.reason) {
+             subTotal += itemAmt;
+             addTx({ type: 'expense', amount: itemAmt, reason: item.reason, tag, date });
+          }
+       });
+       
+       const remaining = totalNum - subTotal;
+       if (remaining > 0) {
+          addTx({ type: 'expense', amount: remaining, reason: reason || 'Remaining Balance', tag, date });
+       }
+    } 
+    // 3. Handle Standard Simple Transactions
+    else {
+       const txData = { amount: totalNum, type, date, reason };
+       if (type === 'expense' || type === 'borrowed') {
+          if (!tag) return alert("Please select a tag.");
+          txData.tag = tag;
+       }
+       if (type === 'borrowed') {
+          if (selectedFriends.length === 0) return alert("Please select a person.");
+          txData.person = selectedFriends[0]; // Single borrow only
+       }
+       addTx(txData);
     }
 
-    addTx(txData);
-    setAmount(''); setReason('');
+    // Reset Form
+    setAmount(''); setReason(''); setSubItems([]); setSelectedFriends([]); setCustomSplits({});
+  };
+
+  const handleFriendToggle = (f) => {
+     if (type === 'borrowed') {
+        setSelectedFriends([f]); // Borrow is single-select
+     } else {
+        setSelectedFriends(prev => prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f]);
+     }
   };
 
   return (
@@ -501,84 +595,140 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="space-y-6 xl:col-span-1">
-          <div className={`p-6 rounded-3xl ${cardClasses}`}>
-            <h3 className="font-bold text-xl mb-5">Log Entry</h3>
-            <form onSubmit={handleSubmit} className="space-y-5">
-              
-              <div className="grid grid-cols-2 gap-2 p-1 bg-gray-500/10 rounded-xl">
-                <button type="button" onClick={() => setType('expense')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'expense' ? 'bg-rose-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Expense</button>
-                <button type="button" onClick={() => setType('income')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'income' ? 'bg-emerald-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Income</button>
-                <button type="button" onClick={() => setType('borrowed')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'borrowed' ? 'bg-amber-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><Ghost size={14}/> Borrowed</button>
-                <button type="button" onClick={() => setType('lent')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'lent' ? 'bg-indigo-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><HandCoins size={14}/> Lent</button>
-              </div>
-              
-              <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (₹)" className={`w-full p-4 text-xl font-bold rounded-2xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} required />
-              
-              {(type === 'expense' || type === 'borrowed') && (
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                     <label className="text-xs font-bold opacity-60">Category Tag</label>
-                     <button type="button" onClick={() => setShowTagModal(true)} className="text-xs font-bold text-rose-500 hover:underline">Manage Tags</button>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {settings.tags.map(t => (
-                      <button 
-                        key={t.id} type="button" onClick={() => setTag(t.name)}
-                        className={`px-3 py-1.5 rounded-full text-sm font-bold transition-all ${tag === t.name ? 'ring-2 ring-offset-2 ring-gray-400 scale-105' : 'opacity-80 hover:opacity-100 hover:scale-105'}`}
-                        style={{ backgroundColor: t.color, color: '#fff', outline: 'none' }}
-                      >
-                        {t.name}
-                      </button>
-                    ))}
-                  </div>
+        
+        {/* LOG ENTRY PANEL */}
+        {!readOnly && (
+          <div className="space-y-6 xl:col-span-1">
+            <div className={`p-6 rounded-3xl ${cardClasses}`}>
+              <h3 className="font-bold text-xl mb-5">Log Entry</h3>
+              <form onSubmit={handleSubmit} className="space-y-5">
+                
+                {/* Type Switcher */}
+                <div className="grid grid-cols-2 gap-2 p-1 bg-gray-500/10 rounded-xl">
+                  <button type="button" onClick={() => setType('expense')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'expense' ? 'bg-rose-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Expense</button>
+                  <button type="button" onClick={() => setType('income')} className={`py-2 text-sm font-bold rounded-lg transition-colors ${type === 'income' ? 'bg-emerald-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}>Income</button>
+                  <button type="button" onClick={() => setType('borrowed')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'borrowed' ? 'bg-amber-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><Ghost size={14}/> Borrow</button>
+                  <button type="button" onClick={() => setType('lent')} className={`py-2 text-sm font-bold rounded-lg transition-colors flex items-center justify-center gap-1 ${type === 'lent' ? 'bg-indigo-500 text-white shadow' : 'opacity-70 hover:opacity-100'}`}><HandCoins size={14}/> Lent</button>
                 </div>
-              )}
+                
+                {/* Amount */}
+                <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Total Amount (₹)" className={`w-full p-4 text-2xl font-black rounded-2xl border outline-none transition-colors ${dark ? 'bg-gray-950 border-gray-800 text-white focus:border-rose-500' : 'bg-gray-50 border-gray-200 focus:border-rose-500'}`} required />
+                
+                {/* Expense Sub-Items */}
+                {type === 'expense' && (
+                   <div className={`p-3 rounded-2xl border ${dark ? 'bg-gray-950/50 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                      <div className="flex justify-between items-center mb-2">
+                         <span className="text-xs font-bold uppercase opacity-60">Itemize (Optional)</span>
+                         <button type="button" onClick={() => setSubItems([...subItems, { id: Date.now(), reason: '', amount: '' }])} className="text-xs font-bold text-rose-500 flex items-center gap-1"><Plus size={12}/> Add Sub-item</button>
+                      </div>
+                      {subItems.map((item, idx) => (
+                         <div key={item.id} className="flex gap-2 mb-2">
+                            <input type="text" placeholder="Item name" value={item.reason} onChange={e => { const n = [...subItems]; n[idx].reason = e.target.value; setSubItems(n); }} className={`flex-1 p-2 text-sm rounded-lg border outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+                            <input type="number" placeholder="₹" value={item.amount} onChange={e => { const n = [...subItems]; n[idx].amount = e.target.value; setSubItems(n); }} className={`w-20 p-2 text-sm rounded-lg border outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+                            <button type="button" onClick={() => setSubItems(subItems.filter(s => s.id !== item.id))} className="p-2 text-rose-500 hover:bg-rose-500/10 rounded-lg"><X size={14}/></button>
+                         </div>
+                      ))}
+                      {subItems.length > 0 && (
+                         <div className="text-xs font-bold opacity-60 mt-2 text-right">
+                            Remaining: ₹{Math.max(0, Number(amount) - subItems.reduce((acc, i) => acc + Number(i.amount), 0))}
+                         </div>
+                      )}
+                   </div>
+                )}
 
-              {(type === 'borrowed' || type === 'lent') && (
-                 <div>
+                {/* Tags */}
+                {(type === 'expense' || type === 'borrowed') && (
+                  <div>
                     <div className="flex justify-between items-center mb-2">
-                       <label className="text-xs font-bold opacity-60">Friend / Person</label>
-                       <button type="button" onClick={() => setShowFriendModal(true)} className="text-xs font-bold text-rose-500 hover:underline">Manage Friends</button>
+                        <label className="text-xs font-bold uppercase opacity-60">Category Tag</label>
+                        <button type="button" onClick={() => setShowTagModal(true)} className="text-xs font-bold text-rose-500 hover:underline">Manage</button>
                     </div>
-                    <select value={person} onChange={e=>setPerson(e.target.value)} className={`w-full p-3 font-bold rounded-xl border ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'} outline-none`}>
-                       <option value="" disabled>Select a person...</option>
-                       {settings.friends.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
-                    </select>
-                 </div>
-              )}
+                    <div className="flex flex-wrap gap-2">
+                      {settings.tags.map(t => (
+                        <button 
+                          key={t.id} type="button" onClick={() => setTag(t.name)}
+                          className={`px-3 py-1.5 rounded-full text-sm font-bold transition-all ${tag === t.name ? 'ring-2 ring-offset-2 ring-gray-400 scale-105' : 'opacity-80 hover:opacity-100 hover:scale-105'}`}
+                          style={{ backgroundColor: t.color, color: '#fff', outline: 'none' }}
+                        >
+                          {t.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-              <input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="Reason (Optional)" className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} className={`w-full p-3 rounded-xl border font-medium ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none focus:border-rose-500`} />
-              
-              <button type="submit" className={`w-full py-4 text-white rounded-2xl font-black text-lg transition-transform hover:scale-[1.02] active:scale-[0.98] bg-rose-600 hover:bg-rose-700 shadow-lg shadow-rose-500/20`}>
-                Save Transaction
-              </button>
-            </form>
-          </div>
+                {/* Friends / Splitwise */}
+                {(type === 'borrowed' || type === 'lent') && (
+                   <div>
+                      <div className="flex justify-between items-center mb-2">
+                         <label className="text-xs font-bold uppercase opacity-60">{type === 'lent' ? 'Select Friends (Multi)' : 'Select Friend'}</label>
+                         <button type="button" onClick={() => setShowFriendModal(true)} className="text-xs font-bold text-indigo-500 hover:underline">Manage</button>
+                      </div>
+                      <div className="flex flex-wrap gap-2 mb-3">
+                         {settings.friends.map(f => (
+                            <button key={f.id} type="button" onClick={() => handleFriendToggle(f.name)}
+                               className={`px-3 py-1.5 rounded-full text-sm font-bold border transition-colors ${selectedFriends.includes(f.name) ? 'bg-indigo-500 border-indigo-500 text-white' : (dark ? 'bg-gray-900 border-gray-700' : 'bg-gray-100 border-gray-300')}`}
+                            >
+                               {f.name}
+                            </button>
+                         ))}
+                      </div>
 
-          <div className={`p-6 rounded-3xl ${cardClasses}`}>
-            <div className="flex justify-between items-center mb-4">
-               <h3 className="font-bold">Quick Adds</h3>
-               <button onClick={() => setShowQAModal(true)} className="p-1.5 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 transition-colors"><Settings size={16}/></button>
+                      {type === 'lent' && selectedFriends.length > 0 && (
+                         <div className={`p-4 rounded-2xl border ${dark ? 'bg-gray-950/50 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
+                            <div className="flex justify-between items-center mb-4">
+                               <span className="text-xs font-bold uppercase">Split Method</span>
+                               <div className="flex bg-gray-500/20 rounded-lg p-1">
+                                  <button type="button" onClick={() => setSplitMode('equal')} className={`px-2 py-1 text-xs font-bold rounded ${splitMode === 'equal' ? 'bg-indigo-500 text-white' : 'opacity-70'}`}>Equal</button>
+                                  <button type="button" onClick={() => setSplitMode('custom')} className={`px-2 py-1 text-xs font-bold rounded ${splitMode === 'custom' ? 'bg-indigo-500 text-white' : 'opacity-70'}`}>Custom</button>
+                               </div>
+                            </div>
+                            
+                            {selectedFriends.map(f => (
+                               <div key={f} className="flex justify-between items-center mb-2 text-sm font-bold">
+                                  <span>{f}</span>
+                                  {splitMode === 'equal' ? (
+                                     <span>₹{(Number(amount) / selectedFriends.length).toFixed(2)}</span>
+                                  ) : (
+                                     <input type="number" placeholder="₹" value={customSplits[f] || ''} onChange={e => setCustomSplits({...customSplits, [f]: e.target.value})} className={`w-24 p-2 rounded-lg border text-right outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+                                  )}
+                               </div>
+                            ))}
+                         </div>
+                      )}
+                   </div>
+                )}
+
+                <input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="Main Reason (Optional)" className={`w-full p-3 rounded-xl border ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none`} />
+                <input type="date" value={date} onChange={e => setDate(e.target.value)} className={`w-full p-3 rounded-xl border font-bold ${dark ? 'bg-gray-950 border-gray-800 text-white' : 'bg-gray-50 border-gray-200'} focus:outline-none`} />
+                
+                <button type="submit" className={`w-full py-4 text-white rounded-2xl font-black text-lg transition-transform hover:scale-[1.02] active:scale-[0.98] ${type==='income'?'bg-emerald-600':type==='borrowed'?'bg-amber-600':type==='lent'?'bg-indigo-600':'bg-rose-600'} shadow-lg`}>
+                  Save Transaction
+                </button>
+              </form>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {settings.quickAdds.map(qa => {
-                 const tagConfig = settings.tags.find(t => t.name === qa.tag) || { color: '#888' };
-                 return (
-                   <button key={qa.id} onClick={() => addTx({amount: qa.amount, tag: qa.tag, reason: qa.reason, type: 'expense', date: new Date().toISOString().split('T')[0]})} className={`px-4 py-2.5 rounded-2xl text-sm flex flex-col items-start gap-1 transition-transform hover:scale-105 active:scale-95 ${dark ? 'bg-gray-950 border border-gray-800 hover:border-gray-700' : 'bg-white border border-gray-200 shadow-sm hover:border-gray-300'}`}>
-                     <span className="font-black">₹{qa.amount}</span>
-                     <span className="font-medium text-xs opacity-80" style={{color: tagConfig.color}}>{qa.tag}</span>
-                     {qa.reason && <span className="text-[10px] font-medium opacity-60 truncate max-w-[100px]">{qa.reason}</span>}
-                   </button>
-                 );
-              })}
-              {settings.quickAdds.length === 0 && <span className="text-sm font-medium opacity-50">No quick adds configured.</span>}
+
+            <div className={`p-6 rounded-3xl ${cardClasses}`}>
+              <div className="flex justify-between items-center mb-4">
+                 <h3 className="font-bold">Quick Adds</h3>
+                 <button onClick={() => setShowQAModal(true)} className="p-1.5 rounded-lg bg-gray-500/10"><Settings size={16}/></button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {settings.quickAdds.map(qa => {
+                   const tagConfig = settings.tags.find(t => t.name === qa.tag) || { color: '#888' };
+                   return (
+                     <button key={qa.id} onClick={() => addTx({amount: qa.amount, tag: qa.tag, reason: qa.reason, type: 'expense', date: new Date().toISOString().split('T')[0]})} className={`px-4 py-2.5 rounded-2xl text-sm flex flex-col items-start gap-1 transition-transform hover:scale-105 ${dark ? 'bg-gray-950 border border-gray-800' : 'bg-white border border-gray-200 shadow-sm'}`}>
+                       <span className="font-black">₹{qa.amount}</span>
+                       <span className="font-medium text-xs opacity-80" style={{color: tagConfig.color}}>{qa.tag}</span>
+                     </button>
+                   );
+                })}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
-        <div className={`p-6 rounded-3xl xl:col-span-2 flex flex-col h-[700px] ${cardClasses}`}>
+        <div className={`p-6 rounded-3xl ${readOnly ? 'xl:col-span-3' : 'xl:col-span-2'} flex flex-col h-[700px] ${cardClasses}`}>
           <div className="flex justify-between items-center mb-6">
              <h3 className="font-bold text-xl">Ledger Activity ({dateBounds.label})</h3>
           </div>
@@ -586,7 +736,7 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
             {transactions.length === 0 ? (
               <div className="h-full flex items-center justify-center opacity-50 font-medium">No transactions in this period.</div>
             ) : (
-              transactions.map(t => <TransactionRow key={t.id} t={t} settings={settings} dark={dark} onEdit={() => editTx(t)} onDelete={() => deleteTx(t.id)} />)
+              transactions.map(t => <TransactionRow key={t.id} t={t} settings={settings} dark={dark} onEdit={() => editTx(t)} onDelete={() => deleteTx(t.id)} readOnly={readOnly} />)
             )}
           </div>
         </div>
@@ -599,7 +749,7 @@ const DashboardView = ({ balance, income, expense, transactions, addTx, deleteTx
   );
 };
 
-const TransactionRow = ({ t, settings, dark, onEdit, onDelete }) => {
+const TransactionRow = ({ t, settings, dark, onEdit, onDelete, readOnly }) => {
   const isExpenseType = t.type === 'expense' || t.type === 'borrowed';
   const tagConfig = isExpenseType ? (settings.tags.find(x => x.name === t.tag) || { color: '#888' }) : null;
   
@@ -612,29 +762,17 @@ const TransactionRow = ({ t, settings, dark, onEdit, onDelete }) => {
   if (t.type === 'expense') {
      color = tagConfig.color;
   } else if (t.type === 'income') {
-     color = '#22c55e';
-     amountPrefix = '+';
-     amountColor = 'text-emerald-500';
-     label = t.reason || 'Income';
-     sublabel = 'Added to Balance';
+     color = '#22c55e'; amountPrefix = '+'; amountColor = 'text-emerald-500';
+     label = t.reason || 'Income'; sublabel = 'Added to Balance';
   } else if (t.type === 'borrowed') {
-     color = '#f59e0b';
-     label = t.reason || `${t.tag} (Credit)`;
-     sublabel = `Ghost Exp. (Owe ${t.person})`;
+     color = '#f59e0b'; label = t.reason || `${t.tag} (Credit)`; sublabel = `Ghost Exp. (Owe ${t.person})`;
   } else if (t.type === 'lent') {
-     color = '#6366f1';
-     label = t.reason || `Lent Money`;
-     sublabel = `To ${t.person}`;
+     color = '#6366f1'; label = t.reason || `Lent Money`; sublabel = `To ${t.person}`;
   } else if (t.type === 'settle_gave') {
-     color = '#f43f5e';
-     label = `Paid ${t.person}`;
-     sublabel = t.reason || 'Debt Settlement';
+     color = '#f43f5e'; label = `Paid ${t.person}`; sublabel = t.reason || 'Debt Settlement';
   } else if (t.type === 'settle_received') {
-     color = '#22c55e';
-     amountPrefix = '+';
-     amountColor = 'text-emerald-500';
-     label = `Received from ${t.person}`;
-     sublabel = t.reason || 'Debt Settlement';
+     color = '#22c55e'; amountPrefix = '+'; amountColor = 'text-emerald-500';
+     label = `Received from ${t.person}`; sublabel = t.reason || 'Debt Settlement';
   }
 
   return (
@@ -656,10 +794,12 @@ const TransactionRow = ({ t, settings, dark, onEdit, onDelete }) => {
         <div className={`font-black text-lg md:text-xl tracking-tight ${amountColor}`}>
           {amountPrefix}₹{Number(t.amount).toLocaleString('en-IN')}
         </div>
-        <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex flex-col md:flex-row gap-1 md:gap-2">
-           <button onClick={onEdit} className="p-2 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 text-gray-500 transition-colors"><Pencil size={14}/></button>
-           <button onClick={onDelete} className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-colors"><Trash2 size={14}/></button>
-        </div>
+        {!readOnly && (
+           <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex flex-col md:flex-row gap-1 md:gap-2">
+              <button onClick={onEdit} className="p-2 rounded-lg bg-gray-500/10 hover:bg-gray-500/20 text-gray-500 transition-colors"><Pencil size={14}/></button>
+              <button onClick={onDelete} className="p-2 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-colors"><Trash2 size={14}/></button>
+           </div>
+        )}
       </div>
     </div>
   )
@@ -684,7 +824,7 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
 
   const totalSpend = pieData.reduce((acc, item) => acc + item.value, 0);
 
-  // Calendar Heatmap Logic - Deriving limits dynamically based on current transactions
+  // Calendar Heatmap Logic
   const dailySpend = {};
   expenses.forEach(t => {
     const dateStr = t.date.split('T')[0];
@@ -692,14 +832,12 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
   });
   const maxDailySpend = Math.max(0, ...Object.values(dailySpend));
   
-  // Decide which month to show. Default to Current Month if lifetime, or the month of the "start" bound.
   const calBaseDate = dateBounds.start ? new Date(dateBounds.start) : new Date();
   const currentYear = calBaseDate.getFullYear();
   const currentMonth = calBaseDate.getMonth();
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
   const firstDayOfWeek = new Date(currentYear, currentMonth, 1).getDay();
   const calendarDays = Array(firstDayOfWeek).fill(null).concat(Array.from({length: daysInMonth}, (_, i) => i + 1));
-  const monthName = calBaseDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
   return (
     <div className="space-y-6">
@@ -753,7 +891,7 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
                               .map(t => (
                                  <div key={t.id}>
                                     <div className="flex justify-between items-center text-sm mb-1.5">
-                                       <span className="truncate max-w-[150px] font-bold">{t.reason || t.tag} {t.type==='borrowed' && '(Ghost)'}</span>
+                                       <span className="truncate max-w-[150px] font-bold">{t.reason || t.tag}</span>
                                        <span className="font-black opacity-80" style={{color: item.color}}>₹{Number(t.amount).toLocaleString()}</span>
                                     </div>
                                     <div className="w-full bg-gray-100 dark:bg-gray-800/50 rounded-full h-2 overflow-hidden">
@@ -767,7 +905,6 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
                   )}
                 </div>
               ))}
-              {pieData.length === 0 && <div className="opacity-50 font-medium text-center py-10">No categories found.</div>}
            </div>
         </div>
       </div>
@@ -775,18 +912,16 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
       <div className={`p-6 rounded-3xl ${cardClasses}`}>
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
            <h3 className="font-bold text-xl flex items-center gap-3"><CalendarDays size={24} className="text-rose-500"/> Spending Heatmap</h3>
-           <span className="px-4 py-2 bg-gray-100 dark:bg-gray-800 rounded-xl text-sm font-bold opacity-80">{monthName}</span>
+           <span className="px-4 py-2 bg-gray-100 dark:bg-gray-800 rounded-xl text-sm font-bold opacity-80">{calBaseDate.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
         </div>
         <div className="grid grid-cols-7 gap-2 md:gap-4 max-w-3xl mx-auto">
           {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => <div key={d} className="text-center text-xs font-black tracking-widest opacity-50 mb-2 uppercase">{d}</div>)}
           {calendarDays.map((day, idx) => {
              if (!day) return <div key={`empty-${idx}`} className="aspect-square" />;
              
-             // Build date string correctly adjusting for timezone issues manually
              const monthStr = String(currentMonth + 1).padStart(2, '0');
              const dayStr = String(day).padStart(2, '0');
              const dStr = `${currentYear}-${monthStr}-${dayStr}`;
-             
              const spend = dailySpend[dStr] || 0;
              const intensity = maxDailySpend > 0 ? (spend / maxDailySpend) : 0;
              const hasSpend = spend > 0;
@@ -812,7 +947,7 @@ const AnalyticsView = ({ transactions, settings, onTagClick, dateBounds, cardCla
   );
 };
 
-const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx, dateBounds, cardClasses, dark }) => {
+const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx, dateBounds, cardClasses, dark, readOnly }) => {
   const tagExpenses = transactions.filter(t => (t.type === 'expense' || t.type === 'borrowed') && t.tag === tag).sort((a,b) => b.amount - a.amount);
   const maxAmt = Math.max(0, ...tagExpenses.map(t => Number(t.amount)));
   const tagConfig = settings.tags.find(t => t.name === tag) || { color: '#888' };
@@ -843,10 +978,12 @@ const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx,
                     </div>
                     <div className="flex items-center gap-4">
                        <div className="font-black text-2xl tracking-tighter" style={{color: tagConfig.color}}>₹{Number(t.amount).toLocaleString('en-IN')}</div>
-                       <div className="opacity-100 md:opacity-0 group-hover:opacity-100 flex gap-1">
-                           <button onClick={() => editTx(t)} className="p-2 rounded-lg hover:bg-gray-500/20 text-gray-500"><Pencil size={16}/></button>
-                           <button onClick={() => deleteTx(t.id)} className="p-2 rounded-lg hover:bg-rose-500/20 text-rose-500"><Trash2 size={16}/></button>
-                       </div>
+                       {!readOnly && (
+                          <div className="opacity-100 md:opacity-0 group-hover:opacity-100 flex gap-1">
+                              <button onClick={() => editTx(t)} className="p-2 rounded-lg hover:bg-gray-500/20 text-gray-500"><Pencil size={16}/></button>
+                              <button onClick={() => deleteTx(t.id)} className="p-2 rounded-lg hover:bg-rose-500/20 text-rose-500"><Trash2 size={16}/></button>
+                          </div>
+                       )}
                     </div>
                  </div>
                  <div className="w-full bg-gray-200 dark:bg-gray-800/80 rounded-full h-3 overflow-hidden">
@@ -860,26 +997,8 @@ const TagDetailsView = ({ tag, transactions, settings, onBack, editTx, deleteTx,
   );
 };
 
-const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSettings, cardClasses, dark }) => {
-  const [selectedFriend, setSelectedFriend] = useState(null);
-  const [settleAmount, setSettleAmount] = useState('');
-  
+const DebtsView = ({ friendLedgers, owedToMe, iOwe, onSelectFriend, cardClasses, dark }) => {
   const activeFriends = Object.entries(friendLedgers).filter(([_, ledger]) => ledger.netBalance !== 0);
-
-  const handleSettle = (friendName, netBalance) => {
-     if(!settleAmount) return;
-     const isReceiving = netBalance > 0; 
-     
-     addTx({
-        type: isReceiving ? 'settle_received' : 'settle_gave',
-        amount: Number(settleAmount),
-        person: friendName,
-        reason: 'Debt Settlement',
-        date: new Date().toISOString().split('T')[0]
-     });
-     setSettleAmount('');
-     setSelectedFriend(null);
-  };
 
   return (
     <div className="space-y-6">
@@ -905,11 +1024,10 @@ const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSetti
             {activeFriends.map(([friendName, ledger]) => {
                const owesMe = ledger.netBalance > 0;
                const absBal = Math.abs(ledger.netBalance);
-               const isSelected = selectedFriend === friendName;
 
                return (
-                  <div key={friendName} className={`p-6 rounded-3xl border transition-all shadow-sm ${dark ? 'border-gray-800 bg-gray-950/40' : 'border-gray-200 bg-white'}`}>
-                     <div className="flex justify-between items-center cursor-pointer" onClick={() => setSelectedFriend(isSelected ? null : friendName)}>
+                  <div key={friendName} onClick={() => onSelectFriend(friendName)} className={`p-6 rounded-3xl border transition-all shadow-sm cursor-pointer hover:scale-[1.01] ${dark ? 'border-gray-800 bg-gray-950/40 hover:bg-gray-800/80' : 'border-gray-200 bg-white hover:border-indigo-300'}`}>
+                     <div className="flex justify-between items-center">
                         <div className="font-black text-2xl flex items-center gap-3">
                            <div className={`w-3 h-3 rounded-full ${owesMe ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
                            {friendName}
@@ -918,23 +1036,6 @@ const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSetti
                            {owesMe ? 'Owes you ' : 'You owe '} ₹{absBal.toLocaleString('en-IN')}
                         </div>
                      </div>
-                     
-                     {isSelected && (
-                        <div className="mt-6 pt-6 border-t border-gray-700/30 flex flex-col md:flex-row gap-4 items-center">
-                           <div className="flex-1 w-full text-sm font-bold opacity-70">
-                              Record a partial or full settlement payment:
-                           </div>
-                           <div className="flex w-full md:w-auto gap-2">
-                              <input 
-                                 type="number" value={settleAmount} onChange={e=>setSettleAmount(e.target.value)} 
-                                 placeholder={`Max ₹${absBal}`} max={absBal}
-                                 className={`w-32 p-3 font-bold rounded-xl border outline-none focus:border-indigo-500 ${dark ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-300'}`}
-                              />
-                              <button onClick={() => setSettleAmount(absBal)} className="px-4 py-3 text-sm font-bold rounded-xl bg-gray-500/10 hover:bg-gray-500/20 transition-colors">Full</button>
-                              <button onClick={() => handleSettle(friendName, ledger.netBalance)} className="px-6 py-3 font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">Settle</button>
-                           </div>
-                        </div>
-                     )}
                   </div>
                )
             })}
@@ -943,6 +1044,65 @@ const DebtsView = ({ friendLedgers, owedToMe, iOwe, addTx, settings, updateSetti
     </div>
   );
 };
+
+const FriendProfileView = ({ friendName, ledger, onBack, addTx, editTx, deleteTx, cardClasses, dark, readOnly, settings }) => {
+   const [settleAmount, setSettleAmount] = useState('');
+   const [settleDate, setSettleDate] = useState(new Date().toISOString().split('T')[0]);
+
+   const netBalance = ledger?.netBalance || 0;
+   const owesMe = netBalance > 0;
+   const absBal = Math.abs(netBalance);
+   const history = ledger?.history.sort((a,b) => new Date(b.date) - new Date(a.date)) || [];
+
+   const handleSettle = () => {
+      if(!settleAmount) return;
+      addTx({
+         type: owesMe ? 'settle_received' : 'settle_gave',
+         amount: Number(settleAmount),
+         person: friendName,
+         reason: 'Debt Settlement',
+         date: settleDate
+      });
+      setSettleAmount('');
+   };
+
+   return (
+      <div className="space-y-6">
+         <div className={`p-8 rounded-3xl ${cardClasses} flex items-center gap-4 border-b-4 ${netBalance === 0 ? 'border-gray-500' : owesMe ? 'border-emerald-500' : 'border-rose-500'}`}>
+            <button onClick={onBack} className="p-3 rounded-2xl bg-gray-500/10 hover:bg-gray-500/20"><ChevronLeft size={20}/></button>
+            <div className="flex-1">
+               <h2 className="text-3xl font-black">{friendName}'s Profile</h2>
+               <div className={`font-bold mt-1 ${netBalance === 0 ? 'opacity-50' : owesMe ? 'text-emerald-500' : 'text-rose-500'}`}>
+                  {netBalance === 0 ? 'All Settled Up' : `${owesMe ? 'Owes you' : 'You owe them'} ₹${absBal.toLocaleString('en-IN')}`}
+               </div>
+            </div>
+         </div>
+
+         {!readOnly && netBalance !== 0 && (
+            <div className={`p-6 rounded-3xl border border-indigo-500/30 ${dark ? 'bg-indigo-950/20' : 'bg-indigo-50'}`}>
+               <h4 className="font-bold mb-4 uppercase tracking-widest text-xs opacity-70">Record a Settlement</h4>
+               <div className="flex flex-col md:flex-row gap-4 items-center">
+                  <input type="number" placeholder={`Max ₹${absBal}`} max={absBal} value={settleAmount} onChange={e=>setSettleAmount(e.target.value)} className={`flex-1 p-4 rounded-xl border font-bold outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+                  <input type="date" value={settleDate} onChange={e=>setSettleDate(e.target.value)} className={`flex-1 p-4 rounded-xl border font-bold outline-none ${dark ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`} />
+                  <button onClick={() => setSettleAmount(absBal)} className="p-4 rounded-xl font-bold bg-gray-500/10 hover:bg-gray-500/20">Full</button>
+                  <button onClick={handleSettle} className="px-8 py-4 rounded-xl font-bold bg-indigo-600 text-white hover:bg-indigo-700">Settle</button>
+               </div>
+            </div>
+         )}
+
+         <div className={`p-6 rounded-3xl ${cardClasses}`}>
+            <h3 className="font-bold text-xl mb-6">Ledger History</h3>
+            <div className="space-y-3">
+               {history.length === 0 ? (
+                  <div className="opacity-50 py-10 text-center font-bold">No past transactions.</div>
+               ) : (
+                  history.map(t => <TransactionRow key={t.id} t={t} settings={settings} dark={dark} onEdit={() => editTx(t)} onDelete={() => deleteTx(t.id)} readOnly={readOnly} />)
+               )}
+            </div>
+         </div>
+      </div>
+   );
+}
 
 
 const EditTransactionModal = ({ tx, settings, onSave, onClose, dark }) => {
@@ -956,10 +1116,7 @@ const EditTransactionModal = ({ tx, settings, onSave, onClose, dark }) => {
    });
 
    const handleSave = () => {
-      onSave(tx.id, {
-         ...formData,
-         amount: Number(formData.amount)
-      });
+      onSave(tx.id, { ...formData, amount: Number(formData.amount) });
    };
 
    return (
@@ -1139,64 +1296,4 @@ const QuickAddManagerModal = ({ settings, updateSettings, onClose, dark }) => {
          </div>
       </div>
    );
-}
-
-const ShareModal = ({ user, currentBounds, onClose, dark }) => {
-   const [link, setLink] = useState('');
-   const [copied, setCopied] = useState(false);
-
-   const start = currentBounds.start || '2000-01-01'; // Default for lifetime
-   const end = currentBounds.end || '2100-01-01';     // Default for lifetime
-
-   const generate = () => {
-      // Vercel Proof URL generation using URL params natively. Never 404s.
-      const url = `${window.location.origin}/?share=${user.uid}&s=${start}&e=${end}`;
-      setLink(url);
-   }
-
-   const copyToClipboard = () => {
-      navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-   }
-
-   return (
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-         <div className={`w-full max-w-sm p-8 rounded-[2rem] shadow-2xl ${dark ? 'bg-gray-900 border border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
-            <div className="flex justify-between items-center mb-6">
-               <h3 className="font-black text-2xl tracking-tight">Share Report</h3>
-               <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-500/20 transition-colors"><X size={20}/></button>
-            </div>
-            
-            <div className="space-y-6">
-               <div className={`p-4 rounded-2xl text-center border-2 border-dashed ${dark ? 'bg-gray-950 border-gray-800' : 'bg-gray-50 border-gray-200'}`}>
-                  <div className="text-xs font-bold uppercase tracking-widest opacity-60 mb-1">Time Period to Share</div>
-                  <div className="font-black text-lg text-rose-500">{currentBounds.label}</div>
-                  {currentBounds.start && (
-                     <div className="text-xs font-medium opacity-60 mt-1">{new Date(currentBounds.start).toLocaleDateString('en-GB')} - {new Date(currentBounds.end).toLocaleDateString('en-GB')}</div>
-                  )}
-               </div>
-               
-               <p className="text-sm font-medium opacity-70 text-center px-4">
-                  This will generate a secure, read-only link containing your expenses for the selected period. Your bank balance and debts will remain hidden.
-               </p>
-
-               <button onClick={generate} className="w-full py-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-lg transition-transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-rose-500/20 flex items-center justify-center gap-2">
-                  <LinkIcon size={20}/> Generate Link
-               </button>
-               
-               {link && (
-                  <div className="mt-6 p-1 rounded-2xl bg-gray-500/10 border border-gray-500/20 flex flex-col items-center">
-                     <div className="p-4 w-full break-all text-xs md:text-sm font-medium opacity-80 text-center select-all">
-                        {link}
-                     </div>
-                     <button onClick={copyToClipboard} className={`w-full py-3 rounded-xl font-bold transition-colors ${copied ? 'bg-emerald-500 text-white' : (dark ? 'bg-gray-800 hover:bg-gray-700 text-white' : 'bg-white hover:bg-gray-100 text-gray-900 shadow-sm')}`}>
-                        {copied ? 'Copied!' : 'Copy to Clipboard'}
-                     </button>
-                  </div>
-               )}
-            </div>
-         </div>
-      </div>
-   )
 }
